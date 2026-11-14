@@ -13,6 +13,15 @@
  *   mode === 'allow_book'   → YES confirmed; parent renders the existing picker
  *   mode === 'booked_no'    → latest NO on a booked candidate; show read-only
  *   mode === 'withdrawn'    → confirmation screen after a successful withdraw
+ *
+ * Enhancement 1 UI/UX correction (2026-02-14):
+ *   - Larger, more readable typography (text-base body, text-lg section titles)
+ *   - Keyboard-accessible radio tiles with visible focus rings
+ *   - Explicit context-sensitive action buttons:
+ *       • "Save & Keep My Application Active" when candidate picks NO + keep
+ *         (idempotent — if NO is already persisted it just confirms the state)
+ *       • "Confirm Withdrawal" (via existing withdraw flow)
+ *   - Clear "keep-active" thank-you screen so the NO path no longer dead-ends.
  */
 import { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
@@ -30,10 +39,14 @@ function Section({ children, testid }) {
 
 function Radio({ name, value, checked, onChange, testid, children }) {
     return (
-        <label className="flex items-start gap-3 cursor-pointer rounded-lg border border-gray-200 bg-white px-4 py-3 hover:border-blue-400">
+        <label
+            className={`flex items-start gap-3 cursor-pointer rounded-lg border px-4 py-3.5 transition
+                focus-within:ring-2 focus-within:ring-[#2563eb] focus-within:ring-offset-1
+                ${checked ? 'border-[#2563eb] bg-[#eff6ff]' : 'border-gray-300 bg-white hover:border-[#2563eb]'}`}>
             <input type="radio" name={name} value={value} checked={checked} onChange={onChange}
-                   data-testid={testid} className="mt-1 accent-blue-600 w-4 h-4" />
-            <span className="text-sm text-gray-800">{children}</span>
+                   data-testid={testid}
+                   className="mt-1 accent-[#2563eb] w-4 h-4 focus:outline-none" />
+            <span className="text-base text-gray-900 leading-relaxed">{children}</span>
         </label>
     );
 }
@@ -61,6 +74,10 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
     const [withdrawNonce, setWithdrawNonce] = useState(newNonce());
     const [reactNonce, setReactNonce] = useState(newNonce());
     const [thanks, setThanks] = useState('');
+    // Enhancement 1 UI fix — explicit "keep active" acknowledgement screen
+    // (when the NO answer has been persisted AND the candidate confirmed
+    // they do not want to withdraw).
+    const [keptActive, setKeptActive] = useState(false);
 
     const load = () => {
         setLoading(true); setError('');
@@ -74,6 +91,7 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
     const mode = useMemo(() => {
         if (!candidate || !config) return 'loading';
         if (thanks) return 'thanks';
+        if (keptActive) return 'kept_active';
         if (candidate.withdrawn) return 'reactivate';
         // Fresh / unanswered or user is re-answering
         if (choice === null) {
@@ -83,7 +101,7 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
         // choice === false → reason + withdrawal ask
         if (withdrawDecision === true) return 'withdraw';
         return 'no_reason';
-    }, [candidate, config, choice, withdrawDecision, thanks]);
+    }, [candidate, config, choice, withdrawDecision, thanks, keptActive]);
 
     // Hand booking off to parent once YES is persisted server-side.
     useEffect(() => {
@@ -92,8 +110,8 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
         }
     }, [mode, candidate?.latest_availability, onAllowBooking]);
 
-    if (loading) return <div className="text-center text-gray-500 py-10">Loading…</div>;
-    if (error) return <div className="text-center text-red-500 py-10" data-testid="availability-error">{error}</div>;
+    if (loading) return <div className="text-center text-gray-500 py-10 text-base">Loading…</div>;
+    if (error) return <div className="text-center text-red-500 py-10 text-base" data-testid="availability-error">{error}</div>;
 
     // ----- actions -----
     const submitAvailability = async (availability) => {
@@ -130,6 +148,38 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
         } finally { setSubmitting(false); }
     };
 
+    // Enhancement 1 UI fix — the NO + "keep my application active" branch
+    // used to dead-end at a passive green banner. The explicit button below
+    // persists the (already stored) NO decision as idempotent "keep active"
+    // acknowledgement: if availability=false and a reason is already on the
+    // doc we just confirm the state (no second POST, no duplicate audit event);
+    // otherwise we re-send the saved selection with the stable nonce so the
+    // backend upsert is a no-op on retry.
+    const saveKeepActive = async () => {
+        if (submitting) return;
+        // Guard: reason and availability=false must already be persisted.
+        if (candidate.latest_availability === false && candidate.latest_reason_id) {
+            setKeptActive(true);
+            return;
+        }
+        // Fallback (should not normally run — reason is submitted before the
+        // withdraw radios appear). Preserve the audit trail by routing through
+        // the same endpoint with the same nonce so a retry is idempotent.
+        setSubmitting(true);
+        try {
+            const body = { availability: false, submission_nonce: availNonce };
+            if (reasonId) {
+                body.reason_id = reasonId;
+                if (reasonId === 'other') body.other_text = otherText.trim();
+            }
+            const r = await axios.post(`${API}/api/pub/availability/${token}`, body);
+            setCandidate(r.data.candidate);
+            setKeptActive(true);
+        } catch (e) {
+            alert(e.response?.data?.detail || 'Could not save your response.');
+        } finally { setSubmitting(false); }
+    };
+
     const submitReactivation = async () => {
         if (!reactChoice) { alert('Please select an option.'); return; }
         if (submitting) return;
@@ -162,7 +212,7 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
             ? config.yes_label
             : (config.no_label + (candidate.latest_reason_text ? ` — ${candidate.latest_reason_text}` : ''));
         return (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900"
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
                  data-testid="prior-answer-banner">
                 <b>Your previous answer:</b> <span data-testid="prior-answer-text">{label}</span>
             </div>
@@ -170,13 +220,43 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
     };
 
     const activeReasons = (config.reason_options || []).filter(r => r.active !== false);
+    const primaryBtn = "w-full py-3.5 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg text-base tracking-wide disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563eb] focus-visible:ring-offset-2";
+    const secondaryBtn = "flex-1 py-3.5 border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 font-semibold rounded-lg text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2";
 
     // ===== renderers =====
     if (mode === 'thanks') {
         return (
             <Section testid="availability-thanks">
-                <h2 className="text-xl font-bold text-gray-900">Thank you.</h2>
-                <p className="text-gray-700 text-sm">{thanks}</p>
+                <h2 className="text-2xl font-bold text-gray-900">Thank you.</h2>
+                <p className="text-gray-700 text-base leading-relaxed">{thanks}</p>
+            </Section>
+        );
+    }
+
+    if (mode === 'kept_active') {
+        return (
+            <Section testid="availability-kept-active">
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-5 py-4 text-emerald-900"
+                     data-testid="kept-active-banner">
+                    <h2 className="text-xl font-bold mb-1">Your application is active.</h2>
+                    <p className="text-base leading-relaxed">
+                        We've saved your answer. Your application remains active. You can return to this link later if your plans change.
+                    </p>
+                    {candidate.has_booking && candidate.booking && (
+                        <div className="mt-3 text-emerald-950 text-sm">
+                            <div className="font-semibold">Current booking (preserved):</div>
+                            <div data-testid="kept-active-booked-date">Date: {fmtDate(candidate.booking.schedule_date)}</div>
+                            <div data-testid="kept-active-booked-time">Time: {fmtTime(candidate.booking.schedule_time)}</div>
+                        </div>
+                    )}
+                </div>
+                <button
+                    type="button"
+                    onClick={() => { setKeptActive(false); setChoice(null); setReasonId(''); setOtherText(''); setWithdrawDecision(null); }}
+                    data-testid="kept-active-change"
+                    className="text-sm text-[#2563eb] hover:underline font-semibold">
+                    ← Change my answer
+                </button>
             </Section>
         );
     }
@@ -185,7 +265,7 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
         return (
             <Section testid="availability-reactivate">
                 <h2 className="text-xl font-bold text-gray-900">{config.reactivation_question}</h2>
-                <div className="space-y-2">
+                <div className="space-y-3">
                     <Radio name="react" value="yes" checked={reactChoice === 'yes'}
                            onChange={() => setReactChoice('yes')} testid="react-yes">
                         {config.reactivation_yes_label}
@@ -203,10 +283,10 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
                     <textarea value={reactOther} onChange={e => setReactOther(e.target.value)}
                               placeholder={config.reactivation_other_placeholder}
                               data-testid="react-other-text" maxLength={500}
-                              className="w-full border border-gray-300 rounded p-2 text-sm"/>
+                              className="w-full border border-gray-300 rounded-lg p-3 text-base focus:outline-none focus:ring-2 focus:ring-[#2563eb]"/>
                 )}
                 <button onClick={submitReactivation} disabled={submitting} data-testid="react-submit"
-                        className="w-full py-3 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg disabled:opacity-50">
+                        className={primaryBtn}>
                     {submitting ? 'Processing…' : 'Submit'}
                 </button>
             </Section>
@@ -216,22 +296,22 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
     if (mode === 'withdraw') {
         return (
             <Section testid="availability-withdraw">
-                <p className="text-gray-700 text-sm" data-testid="withdraw-explanation">
+                <p className="text-gray-800 text-base leading-relaxed" data-testid="withdraw-explanation">
                     {config.withdraw_explanation}
                 </p>
-                <label className="flex items-start gap-3 text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded p-3">
+                <label className="flex items-start gap-3 text-sm text-gray-800 bg-gray-50 border border-gray-200 rounded-lg p-4 focus-within:ring-2 focus-within:ring-[#2563eb]">
                     <input type="checkbox" checked={withdrawChecked} onChange={e => setWithdrawChecked(e.target.checked)}
-                           data-testid="withdraw-confirm-check" className="mt-0.5 accent-blue-600"/>
-                    <span>{config.withdraw_confirm_check}</span>
+                           data-testid="withdraw-confirm-check" className="mt-0.5 accent-[#2563eb] w-4 h-4"/>
+                    <span className="leading-relaxed">{config.withdraw_confirm_check}</span>
                 </label>
                 <div className="flex gap-3">
                     <button onClick={() => setWithdrawDecision(null)}
-                            className="flex-1 py-3 border border-gray-300 rounded-lg"
+                            className={secondaryBtn}
                             data-testid="withdraw-back">Back</button>
                     <button onClick={submitWithdraw} disabled={!withdrawChecked || submitting}
                             data-testid="withdraw-confirm-btn"
-                            className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg disabled:opacity-50">
-                        {submitting ? 'Processing…' : config.withdraw_button_label}
+                            className="flex-1 py-3.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-base tracking-wide disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2">
+                        {submitting ? 'Processing…' : (config.withdraw_button_label || 'Confirm Withdrawal')}
                     </button>
                 </div>
             </Section>
@@ -239,25 +319,21 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
     }
 
     if (mode === 'no_reason') {
-        // Confirmation for "NO + keep application active": once the reason
-        // is saved AND user picked withdraw=false we show a clear thank-you
-        // state so there is no dead-end (reported in iter64 testing).
-        const noWithdrawConfirmed =
-            candidate.latest_availability === false &&
-            withdrawDecision === false &&
-            candidate.latest_reason_id;
+        const reasonAlreadySaved =
+            candidate.latest_availability === false && !!candidate.latest_reason_id;
         return (
             <Section testid="availability-no-reason">
                 {priorBanner()}
-                <div className="flex items-center justify-between">
-                    <p className="text-gray-800 text-sm font-medium">{config.reason_question}</p>
+                <div className="flex items-center justify-between gap-3">
+                    <p className="text-gray-900 text-base font-semibold">{config.reason_question}</p>
                     <button type="button" onClick={() => { setChoice(null); setReasonId(''); setOtherText(''); setWithdrawDecision(null); }}
                             data-testid="reason-back"
-                            className="text-xs text-blue-600 hover:underline">← Change my answer</button>
+                            className="text-sm text-[#2563eb] hover:underline font-semibold whitespace-nowrap">← Change my answer</button>
                 </div>
                 <select value={reasonId} onChange={e => setReasonId(e.target.value)}
                         data-testid="reason-select"
-                        className="w-full border border-gray-300 rounded p-2 text-sm">
+                        disabled={reasonAlreadySaved}
+                        className="w-full border border-gray-300 rounded-lg p-3 text-base bg-white focus:outline-none focus:ring-2 focus:ring-[#2563eb] disabled:bg-gray-50 disabled:text-gray-600">
                     <option value="">— select one —</option>
                     {activeReasons.map(r => (
                         <option key={r.id} value={r.id} data-testid={`reason-opt-${r.id}`}>{r.label}</option>
@@ -269,24 +345,25 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
                                   onChange={e => setOtherText(e.target.value.slice(0, OTHER_MAX))}
                                   placeholder={config.other_label}
                                   data-testid="reason-other-text"
-                                  className="w-full border border-gray-300 rounded p-2 text-sm"/>
-                        <div className="text-right text-xs text-gray-500" data-testid="reason-other-counter">
+                                  disabled={reasonAlreadySaved}
+                                  className="w-full border border-gray-300 rounded-lg p-3 text-base focus:outline-none focus:ring-2 focus:ring-[#2563eb] disabled:bg-gray-50"/>
+                        <div className="text-right text-sm text-gray-500" data-testid="reason-other-counter">
                             {otherText.length}/{OTHER_MAX}
                         </div>
                     </>
                 )}
-                {!candidate.latest_reason_id && (
+                {!reasonAlreadySaved && (
                     <button onClick={() => submitAvailability(false)}
                             disabled={submitting || !reasonId || (reasonId === 'other' && !otherText.trim())}
                             data-testid="reason-submit"
-                            className="w-full py-3 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg disabled:opacity-50">
+                            className={primaryBtn}>
                         {submitting ? 'Saving…' : 'Submit reason'}
                     </button>
                 )}
 
                 {/* Explanation of in-person-only policy */}
                 {candidate.latest_availability === false && (
-                    <div className="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900"
+                    <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 leading-relaxed"
                          data-testid="inperson-only-explanation">
                         {config.explanation_text}
                     </div>
@@ -294,31 +371,31 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
 
                 {/* Withdrawal question */}
                 {candidate.latest_availability === false && (
-                    <div className="space-y-3 border-t pt-4" data-testid="withdraw-question-block">
-                        <p className="text-gray-800 text-sm font-medium">{config.withdraw_question}</p>
-                        <Radio name="wd" value="yes" checked={withdrawDecision === true}
-                               onChange={() => setWithdrawDecision(true)} testid="wd-yes">
-                            {config.withdraw_yes_label}
-                        </Radio>
-                        <Radio name="wd" value="no" checked={withdrawDecision === false}
-                               onChange={() => setWithdrawDecision(false)} testid="wd-no">
-                            {config.withdraw_no_label}
-                        </Radio>
-                        {noWithdrawConfirmed && (
-                            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900"
-                                 data-testid="keep-active-confirmation">
-                                Your application remains active. You can return to this link later to update your answer.
-                                {candidate.has_booking && candidate.booking && (
-                                    <div className="mt-2 text-emerald-950">
-                                        <div><b>Current booking (preserved):</b></div>
-                                        <div data-testid="booked-no-date">Date: {fmtDate(candidate.booking.schedule_date)}</div>
-                                        <div data-testid="booked-no-time">Time: {fmtTime(candidate.booking.schedule_time)}</div>
-                                    </div>
-                                )}
-                            </div>
+                    <div className="space-y-4 border-t border-gray-200 pt-5" data-testid="withdraw-question-block">
+                        <p className="text-gray-900 text-base font-semibold">{config.withdraw_question}</p>
+                        <div className="space-y-3">
+                            <Radio name="wd" value="yes" checked={withdrawDecision === true}
+                                   onChange={() => setWithdrawDecision(true)} testid="wd-yes">
+                                {config.withdraw_yes_label}
+                            </Radio>
+                            <Radio name="wd" value="no" checked={withdrawDecision === false}
+                                   onChange={() => setWithdrawDecision(false)} testid="wd-no">
+                                {config.withdraw_no_label}
+                            </Radio>
+                        </div>
+
+                        {/* Enhancement 1 fix — explicit action button after NO + keep-active. */}
+                        {withdrawDecision === false && (
+                            <button onClick={saveKeepActive}
+                                    disabled={submitting}
+                                    data-testid="keep-active-btn"
+                                    className={primaryBtn}>
+                                {submitting ? 'Saving…' : 'Save & Keep My Application Active'}
+                            </button>
                         )}
-                        {withdrawDecision === false && !noWithdrawConfirmed && candidate.has_booking && (
-                            <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900"
+
+                        {withdrawDecision === false && candidate.has_booking && (
+                            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 leading-relaxed"
                                  data-testid="booked-no-notice">
                                 {config.booked_no_notice}
                                 {bookedDetails && candidate.booking && (
@@ -340,8 +417,8 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
     return (
         <Section testid="availability-ask">
             {priorBanner()}
-            <h2 className="text-xl font-bold text-gray-900" data-testid="avail-main-q">{config.main_question}</h2>
-            <div className="space-y-2">
+            <h2 className="text-xl font-bold text-gray-900 leading-snug" data-testid="avail-main-q">{config.main_question}</h2>
+            <div className="space-y-3">
                 <Radio name="avail" value="yes" checked={choice === true}
                        onChange={() => setChoice(true)} testid="avail-yes">
                     {config.yes_label}
@@ -357,7 +434,7 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
             }}
                     disabled={choice === null || (choice === true && submitting)}
                     data-testid="avail-continue"
-                    className="w-full py-3 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg disabled:opacity-50">
+                    className={primaryBtn}>
                 {submitting ? 'Saving…' : 'Continue'}
             </button>
         </Section>

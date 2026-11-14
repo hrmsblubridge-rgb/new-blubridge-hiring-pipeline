@@ -46,12 +46,22 @@ function isSunday(dateStr) {
 const PageShell = ({ children, testid }) => (
     <div className="min-h-screen bg-[#f3f1e9] flex flex-col" data-testid={testid}>
         <header className="bg-[#efede5] border-b border-gray-300 py-4 px-6 flex justify-center">
-            <img src="/blubridge-logo.webp" alt="Blubridge" />
+            <img src="/blubridge-logo.webp" alt="Blubridge" className="h-10 sm:h-12" />
         </header>
-        <div className="flex-1 flex items-start justify-center px-4 py-10">
+        <div className="flex-1 flex items-start justify-center px-4 sm:px-6 py-8 sm:py-10">
             {children}
         </div>
         <footer className="py-4 text-center text-sm text-gray-500">Copyright 2026 &copy; <b>Blubridge.com</b></footer>
+    </div>
+);
+
+// Enhancement 1 UI fix — compact, balanced detail row used inside the
+// "Interview Details" info card. Larger label + value typography than the
+// old `text-xs` labels.
+const DetailRow = ({ label, value, testid }) => (
+    <div className="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-3">
+        <span className="text-[11px] sm:text-xs font-bold tracking-widest text-gray-500 uppercase sm:w-20 shrink-0">{label}</span>
+        <span className="text-base text-gray-900 font-medium break-words" data-testid={testid}>{value || '—'}</span>
     </div>
 );
 
@@ -139,29 +149,29 @@ export default function InterviewSchedule() {
         return (
             <PageShell testid="schedule-success">
                 <div className="w-full max-w-xl">
-                    <div className="bg-[#fffdf7] rounded-xl shadow-sm overflow-hidden">
-                        <div className="bg-[#1a2332] h-3 rounded-t-xl"></div>
-                        <div className="p-8 space-y-5">
-                            <h2 className="text-2xl font-bold text-[#1a2332] text-center" data-testid="sched-success-heading">
+                    <div className="bg-[#fffdf7] rounded-2xl shadow-md overflow-hidden">
+                        <div className="bg-[#1a2332] h-3 rounded-t-2xl"></div>
+                        <div className="p-6 sm:p-10 space-y-6">
+                            <h2 className="text-2xl sm:text-3xl font-bold text-[#1a2332] text-center tracking-tight" data-testid="sched-success-heading">
                                 {info?.already_scheduled ? 'Your Interview Has Been Rescheduled!' : 'Your Interview Has Been Scheduled!'}
                             </h2>
                             <div className="h-px bg-gray-300"></div>
-                            <p className="text-gray-800 text-sm leading-relaxed">
+                            <p className="text-gray-800 text-base leading-relaxed">
                                 Thank you for scheduling your interview with <b>Blubridge Technologies</b>.
                             </p>
-                            <div className="space-y-1 text-sm text-gray-800">
-                                <div className="font-bold">Interview Details:</div>
+                            <div className="rounded-xl border border-gray-200 bg-white px-5 py-4 space-y-2 text-base text-gray-900">
+                                <div className="text-sm font-bold uppercase tracking-widest text-gray-500">Interview Details</div>
                                 <div><b>Date:</b> <span data-testid="sched-success-date">{shownDate}</span></div>
                                 <div><b>Time:</b> <span data-testid="sched-success-time">{shownTime}</span></div>
                                 <div><b>Location:</b> <span data-testid="sched-success-location">{COMPANY_ADDRESS}</span></div>
                             </div>
-                            <p className="text-gray-800 text-sm leading-relaxed">
+                            <p className="text-gray-800 text-base leading-relaxed">
                                 A confirmation email with the above details has been sent to your provided email address.
                             </p>
-                            <div className="bg-[#fff9e6] border border-[#f5d76e] rounded p-3 text-sm text-gray-800">
+                            <div className="bg-[#fff9e6] border border-[#f5d76e] rounded-lg p-4 text-sm text-gray-800 leading-relaxed">
                                 <b>⚠ Important:</b> Please ensure you check your <b>Spam/Junk</b> folder if you don't see our email in your inbox, and mark it as "Not Spam" to stay updated.
                             </div>
-                            <p className="text-gray-800 text-sm font-medium">We look forward to meeting you in person!</p>
+                            <p className="text-gray-900 text-base font-semibold">We look forward to meeting you in person!</p>
                             <ConsentOutcome state={consentSaved} manageToken={manageToken} />
                         </div>
                     </div>
@@ -172,59 +182,79 @@ export default function InterviewSchedule() {
 
     return (
         <PageShell testid="schedule-page">
-            <div className="w-full max-w-md">
-                <div className="bg-[#fffdf7] rounded-xl shadow-sm overflow-hidden">
-                    <div className="bg-[#1a2332] h-3 rounded-t-xl"></div>
-                    <div className="p-8 space-y-5">
-                        <h2 className="text-xl font-bold text-gray-900 text-center">
-                            {info?.already_scheduled ? 'Your Interview Details' : 'Schedule Your In-Person Interview'}
-                        </h2>
-                        {missed && <p className="text-red-600 text-sm font-medium text-center">You have missed your interview!</p>}
-                        {info?.already_scheduled && !missed && <p className="text-emerald-600 text-sm font-medium text-center">YOUR INTERVIEW IS ALREADY SCHEDULED.</p>}
-
-                        <div className="space-y-3 text-sm">
-                            <div><label className="text-xs text-gray-500 font-medium">NAME:</label><div className="mt-0.5 font-medium text-gray-900" data-testid="sched-name">{info?.name}</div></div>
-                            <div><label className="text-xs text-gray-500 font-medium">EMAIL:</label><div className="mt-0.5 text-gray-700" data-testid="sched-email">{info?.email}</div></div>
-                            <div><label className="text-xs text-gray-500 font-medium">PHONE:</label><div className="mt-0.5 text-gray-700" data-testid="sched-phone">{info?.phone}</div></div>
-                            {info?.already_scheduled && info?.schedule_date && (
-                                <><div><label className="text-xs text-gray-500 font-medium">DATE:</label><div className="mt-0.5 text-gray-700" data-testid="sched-current-date">{fmtDate(info.schedule_date)}</div></div>
-                                <div><label className="text-xs text-gray-500 font-medium">TIME:</label><div className="mt-0.5 text-gray-700" data-testid="sched-current-time">{fmtTime(info.schedule_time)}</div></div></>
-                            )}
+            <div className="w-full max-w-xl">
+                <div className="bg-[#fffdf7] rounded-2xl shadow-md overflow-hidden">
+                    <div className="bg-[#1a2332] h-3 rounded-t-2xl"></div>
+                    <div className="p-6 sm:p-10 space-y-7">
+                        <div className="text-center space-y-2">
+                            <h2 className="text-2xl sm:text-3xl font-bold text-[#1a2332] tracking-tight">
+                                {info?.already_scheduled ? 'Your Interview Details' : 'Schedule Your In-Person Interview'}
+                            </h2>
+                            {missed && <p className="text-red-600 text-base font-semibold" data-testid="sched-missed-banner">You have missed your interview!</p>}
+                            {info?.already_scheduled && !missed && <p className="text-emerald-700 text-sm font-bold tracking-wide uppercase" data-testid="sched-already-banner">Your interview is already scheduled</p>}
                         </div>
+
+                        <section
+                            aria-labelledby="interview-info-heading"
+                            data-testid="interview-info-card"
+                            className="rounded-xl border border-gray-200 bg-white px-5 py-5 space-y-3">
+                            <h3 id="interview-info-heading" className="text-sm font-bold uppercase tracking-widest text-gray-500">Interview Information</h3>
+                            <DetailRow label="Name"  value={info?.name}  testid="sched-name" />
+                            <DetailRow label="Email" value={info?.email} testid="sched-email" />
+                            <DetailRow label="Phone" value={info?.phone} testid="sched-phone" />
+                            {info?.already_scheduled && info?.schedule_date && (
+                                <>
+                                    <DetailRow label="Date" value={fmtDate(info.schedule_date)} testid="sched-current-date" />
+                                    <DetailRow label="Time" value={fmtTime(info.schedule_time)} testid="sched-current-time" />
+                                </>
+                            )}
+                        </section>
 
                         {/* Enhancement 1 — availability gate. Slot picker only
                             renders once the candidate persists YES. */}
                         {!bookingAllowed && (
-                            <div className="border-t border-gray-200 pt-4" data-testid="availability-gate-wrapper">
+                            <section
+                                aria-labelledby="chennai-availability-heading"
+                                className="rounded-xl border border-blue-200 bg-[#f8fbff] px-5 py-5 space-y-4"
+                                data-testid="availability-gate-wrapper">
+                                <h3 id="chennai-availability-heading" className="text-sm font-bold uppercase tracking-widest text-[#1d4ed8]">Chennai In-Person Availability</h3>
                                 <AvailabilityGate token={token} onAllowBooking={onAllowBooking} bookedDetails />
-                            </div>
+                            </section>
                         )}
 
                         {bookingAllowed && (
                         <>
-                        <div className="border-t border-gray-200 pt-4 space-y-3">
-                            <div className="space-y-1"><label className="text-xs text-gray-600 font-medium">Date:</label>
-                                <input type="date" value={date} min={today} onChange={e => {
+                        <section
+                            aria-labelledby="pick-slot-heading"
+                            data-testid="slot-picker"
+                            className="rounded-xl border border-gray-200 bg-white px-5 py-5 space-y-4">
+                            <h3 id="pick-slot-heading" className="text-sm font-bold uppercase tracking-widest text-gray-500">Pick your interview slot</h3>
+                            <div className="space-y-1.5">
+                                <label className="text-sm text-gray-700 font-semibold" htmlFor="sched-date-input">Date</label>
+                                <input id="sched-date-input" type="date" value={date} min={today} onChange={e => {
                                     if (!isBlocked(e.target.value)) { setDate(e.target.value); setTime(''); }
                                     else alert('Sundays and holidays are not available');
                                 }} data-testid="sched-date"
-                                    className="w-full bg-[#f5f5f5] border border-gray-200 rounded px-3 py-2.5 text-sm focus:outline-none focus:border-blue-400 focus:bg-white" /></div>
-                            <div className="space-y-1"><label className="text-xs text-gray-600 font-medium">Time:</label>
-                                <select value={time} onChange={e => setTime(e.target.value)} data-testid="sched-time"
-                                    className="w-full bg-[#f5f5f5] border border-gray-200 rounded px-3 py-2.5 text-sm focus:outline-none focus:border-blue-400 focus:bg-white">
+                                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#2563eb] focus:border-[#2563eb]" />
+                            </div>
+                            <div className="space-y-1.5">
+                                <label className="text-sm text-gray-700 font-semibold" htmlFor="sched-time-input">Time</label>
+                                <select id="sched-time-input" value={time} onChange={e => setTime(e.target.value)} data-testid="sched-time"
+                                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#2563eb] focus:border-[#2563eb]">
                                     <option value="">Select Time</option>
                                     {TIME_SLOTS.map(t => {
                                         const disabled = isSlotDisabled(t);
                                         return <option key={t} value={t} disabled={disabled} data-testid={`sched-slot-${t.replace(/[^a-z0-9]/gi, '')}${disabled ? '-disabled' : ''}`}>{t}{disabled ? '  (past)' : ''}</option>;
                                     })}
-                                </select></div>
-                        </div>
+                                </select>
+                            </div>
+                        </section>
 
-                        <label className="flex items-start gap-2 text-xs text-gray-700 bg-[#f8fafc] border border-gray-200 rounded p-3" data-testid="ai-consent-row">
+                        <label className="flex items-start gap-3 text-sm text-gray-800 bg-[#f8fafc] border border-gray-200 rounded-lg p-4 focus-within:ring-2 focus-within:ring-[#2563eb]" data-testid="ai-consent-row">
                             <input type="checkbox" checked={aiConsent} onChange={e => setAiConsent(e.target.checked)} disabled={!consentInfo}
-                                data-testid="ai-consent-checkbox" className="mt-0.5 accent-[#2563eb]" />
-                            <span className="whitespace-pre-line">
-                                <b className="block mb-1" data-testid="ai-consent-title">{consentInfo?.title || 'Optional AI Voice Call Consent'}</b>
+                                data-testid="ai-consent-checkbox" className="mt-0.5 accent-[#2563eb] w-4 h-4" />
+                            <span className="whitespace-pre-line leading-relaxed">
+                                <b className="block mb-1 text-base" data-testid="ai-consent-title">{consentInfo?.title || 'Optional AI Voice Call Consent'}</b>
                                 {consentInfo?.text || 'Loading…'}
                             </span>
                         </label>
@@ -232,7 +262,7 @@ export default function InterviewSchedule() {
                         {info?.already_scheduled && <ConsentRenewBox token={token} />}
 
                         <button onClick={handleSchedule} disabled={submitting} data-testid="schedule-btn"
-                            className="w-full py-3 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg disabled:opacity-50 tracking-wide">
+                            className="w-full py-3.5 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg text-base tracking-wide disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563eb] focus-visible:ring-offset-2">
                             {submitting ? 'Processing...' : (info?.already_scheduled ? 'RESCHEDULE INTERVIEW' : 'SCHEDULE INTERVIEW')}
                         </button>
                         </>
