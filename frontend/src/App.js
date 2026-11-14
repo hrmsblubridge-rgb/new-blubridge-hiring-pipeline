@@ -37,6 +37,7 @@ import AILiveMode from "./pages/ai-calling/LiveMode";
 import AIPendingAuthorization from "./pages/ai-calling/PendingAuthorization";
 import AICallHistory from "./pages/ai-calling/CallHistory";
 import AICallingSettings from "./pages/ai-calling/AICallingSettings";
+import InterviewAvailabilitySettings from "./pages/ai-calling/InterviewAvailabilitySettings";
 import TeamScore from "./pages/TeamScore";
 import Profile from "./pages/Profile";
 import PublicJobView from "./pages/PublicJobView";
@@ -80,6 +81,7 @@ function App() {
                         <Route path="/ai-calling/pending-authorization" element={<ProtectedRoute><AIPendingAuthorization /></ProtectedRoute>} />
                         <Route path="/ai-calling/history" element={<ProtectedRoute><AICallHistory /></ProtectedRoute>} />
                         <Route path="/ai-calling/settings" element={<ProtectedRoute><AICallingSettings /></ProtectedRoute>} />
+                        <Route path="/settings/interview-availability" element={<ProtectedRoute><InterviewAvailabilitySettings /></ProtectedRoute>} />
                         <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
                         <Route path="/register/college" element={<CollegeRegistration />} />
                         <Route path="/register/:formId" element={<PublicRegistration />} />

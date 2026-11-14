@@ -4574,6 +4574,21 @@ init_ai_calling(db, get_current_user)
 app.include_router(ai_router)
 app.add_event_handler("startup", ensure_ai_indexes)
 
+# Include Enhancement 1 — Chennai in-person availability module
+try:
+    from bb_availability import (
+        avail_pub_router, avail_admin_router,
+        init_availability, ensure_availability_indexes,
+    )
+    init_availability(db, get_current_user)
+    app.include_router(avail_pub_router)
+    app.include_router(avail_admin_router)
+    app.add_event_handler("startup", ensure_availability_indexes)
+except Exception:
+    import traceback
+    traceback.print_exc()
+    raise
+
 # Include Help / Templates module (iter67)
 try:
     from bb_help import help_router

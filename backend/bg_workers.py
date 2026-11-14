@@ -434,6 +434,10 @@ async def _worker_24h_reminder():
 
             # Find applicants (NEW only): link sent between 24h and 7d ago,
             # not scheduled, no reminder sent, with REQUIRED template fields.
+            # Enhancement 1 — withdrawn candidates are excluded. A candidate
+            # who selected NO without withdrawing is NOT excluded: the
+            # scheduling link still carries the availability gate and the
+            # reminder legitimately re-invites them to respond.
             cursor = _db.bb_registrations.find({
                 **_cutoff_filter(),
                 "is_shortlisted": True,
@@ -441,6 +445,7 @@ async def _worker_24h_reminder():
                 "schedule_date": {"$in": [None, ""]},
                 "reminder_24h_sent": {"$ne": True},
                 "schedule_link_sent_at": {"$lte": twenty_four_h_ago, "$gte": seven_days_ago},
+                "withdrawn_by_candidate": {"$ne": True},
             })
             docs = await cursor.to_list(None)
 
@@ -531,7 +536,11 @@ async def _worker_missed_interview():
             today_str = now.strftime("%Y-%m-%d")
             seven_days_ago_str = (now - timedelta(days=7)).strftime("%Y-%m-%d")
 
-            # Find scheduled interviews (NEW only) for today/past that weren't attended
+            # Find scheduled interviews (NEW only) for today/past that weren't attended.
+            # Enhancement 1 — confirmed withdrawal stops the missed-interview
+            # follow-up. NO without withdrawal is INTENTIONALLY NOT filtered
+            # here — the existing policy (missed-interview WhatsApp/email)
+            # continues to fire.
             cursor = _db.bb_registrations.find({
                 **_cutoff_filter(),
                 "status": "Interview Scheduled",
@@ -539,6 +548,7 @@ async def _worker_missed_interview():
                 "missed_marked": {"$ne": True},
                 "schedule_date": {"$lte": today_str, "$gte": seven_days_ago_str},
                 "schedule_time": {"$nin": [None, ""], "$exists": True},
+                "withdrawn_by_candidate": {"$ne": True},
             })
             docs = await cursor.to_list(None)
 

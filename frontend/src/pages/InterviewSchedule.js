@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import axios from 'axios';
+import AvailabilityGate from '../components/AvailabilityGate';
 import { ConsentRenewBox } from '../components/ConsentRenewBox';
 import { formatDateDDMMYYYY as fmtDate, formatTime12H as fmtTime } from '../utils/dateFormat';
 
@@ -68,6 +69,10 @@ export default function InterviewSchedule() {
     const [consentInfo, setConsentInfo] = useState(null);
     const [consentSaved, setConsentSaved] = useState(null);
     const [manageToken, setManageToken] = useState('');
+    // Enhancement 1 — availability gate: booking form is hidden until the
+    // candidate confirms YES to the Chennai in-person availability question.
+    const [bookingAllowed, setBookingAllowed] = useState(false);
+    const onAllowBooking = useCallback(() => setBookingAllowed(true), []);
     useEffect(() => {
         axios.get(`${API}/api/ai-calling/public/consent-text`).then(r => setConsentInfo(r.data)).catch(() => setConsentInfo(null));
     }, []);
@@ -187,6 +192,16 @@ export default function InterviewSchedule() {
                             )}
                         </div>
 
+                        {/* Enhancement 1 — availability gate. Slot picker only
+                            renders once the candidate persists YES. */}
+                        {!bookingAllowed && (
+                            <div className="border-t border-gray-200 pt-4" data-testid="availability-gate-wrapper">
+                                <AvailabilityGate token={token} onAllowBooking={onAllowBooking} bookedDetails />
+                            </div>
+                        )}
+
+                        {bookingAllowed && (
+                        <>
                         <div className="border-t border-gray-200 pt-4 space-y-3">
                             <div className="space-y-1"><label className="text-xs text-gray-600 font-medium">Date:</label>
                                 <input type="date" value={date} min={today} onChange={e => {
@@ -220,6 +235,8 @@ export default function InterviewSchedule() {
                             className="w-full py-3 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg disabled:opacity-50 tracking-wide">
                             {submitting ? 'Processing...' : (info?.already_scheduled ? 'RESCHEDULE INTERVIEW' : 'SCHEDULE INTERVIEW')}
                         </button>
+                        </>
+                        )}
                     </div>
                 </div>
             </div>

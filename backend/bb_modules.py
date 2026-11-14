@@ -3753,6 +3753,42 @@ async def candidate_journey(
     else:
         date_of_induction = raw_doi or "Not Applicable"
 
+    # Enhancement 1 — availability / withdrawal / reactivation snapshot.
+    # Sourced from the AUTHORITATIVE bb_registrations row (latest, non-superseded).
+    reg_doc = await _db.bb_registrations.find_one(
+        {"$or": [{"email": resolved_email}, {"phone": resolved_phone}],
+         "superseded": {"$ne": True}},
+        sort=[("registered_at", -1)],
+    )
+    avail_block = None
+    if reg_doc:
+        avail_history = []
+        try:
+            avail_history = await _db.bb_availability_responses.find(
+                {"registration_id": str(reg_doc["_id"])},
+                {"_id": 0},
+            ).sort("submitted_at", -1).limit(20).to_list(20)
+        except Exception:
+            pass
+        avail_block = {
+            "latest_availability": reg_doc.get("chennai_availability_latest", None),
+            "latest_availability_at": reg_doc.get("chennai_availability_latest_at"),
+            "latest_reason_id": reg_doc.get("chennai_availability_reason_id"),
+            "latest_reason_text": reg_doc.get("chennai_availability_reason_text"),
+            "latest_other_text": reg_doc.get("chennai_availability_other_text"),
+            "withdrawn_by_candidate": bool(reg_doc.get("withdrawn_by_candidate")),
+            "withdrawn_at": reg_doc.get("withdrawn_at"),
+            "withdrawal_reason_id": reg_doc.get("withdrawal_reason_id"),
+            "withdrawal_reason_text": reg_doc.get("withdrawal_reason_text"),
+            "reactivation_count": int(reg_doc.get("reactivation_count") or 0),
+            "reactivated_at": reg_doc.get("reactivated_at"),
+            "needs_hr_review": bool(reg_doc.get("needs_hr_review")),
+            "needs_hr_review_reason": reg_doc.get("needs_hr_review_reason"),
+            "booked_date": reg_doc.get("schedule_date"),
+            "booked_time": reg_doc.get("schedule_time"),
+            "history": avail_history,
+        }
+
     return {
         "basic": {
             "name": pd_doc.get("name") or "",
@@ -3772,6 +3808,7 @@ async def candidate_journey(
             "result_status_raw": result_status,
             "date_of_induction": date_of_induction,
         },
+        "availability_block": avail_block,
     }
 
 
@@ -5765,6 +5802,24 @@ async def schedule_interview(token: str, data: ScheduleBody):
     reg = await _db.bb_registrations.find_one({"schedule_token": token})
     if not reg:
         raise HTTPException(status_code=404, detail="Invalid or expired link")
+
+    # ---- Enhancement 1 — availability gate ----
+    # Candidates must answer YES to the Chennai in-person availability
+    # question before booking or rescheduling. A missing (null) answer or an
+    # explicit NO blocks new slot selection. Historical bookings whose
+    # candidate never answered are unaffected — they already have
+    # `schedule_date` / `schedule_time` and are not booking a NEW slot here.
+    if reg.get("withdrawn_by_candidate"):
+        raise HTTPException(
+            status_code=409,
+            detail="Your application is withdrawn. Please reactivate it before scheduling."
+        )
+    _latest_avail = reg.get("chennai_availability_latest", None)
+    if _latest_avail is not True:
+        raise HTTPException(
+            status_code=409,
+            detail="Please confirm your Chennai in-person availability before scheduling."
+        )
 
     # ---- OTP-VERIFIED LOCK ----
     # Once the candidate has verified their OTP (i.e. already walked into the

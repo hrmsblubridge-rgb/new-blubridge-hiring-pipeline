@@ -194,6 +194,85 @@ export default function CandidateJourneyModal({ candidate, onClose }) {
 
                         <ProfileCallHistory email={data.basic.email} />
                         <ProfileConsentPanel email={data.basic.email} />
+
+                        {/* Enhancement 1 — Chennai availability snapshot */}
+                        {data.availability_block && (
+                            <section data-testid="journey-availability">
+                                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3 flex items-center gap-2">
+                                    Chennai In-Person Availability
+                                    {data.availability_block.needs_hr_review && (
+                                        <span data-testid="journey-needs-review" className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-900/40 text-amber-300 border-amber-800/50">
+                                            Needs HR Review
+                                        </span>
+                                    )}
+                                </h3>
+                                <div className="border border-zinc-800 px-4 py-3 bg-zinc-900/50 space-y-2 text-sm">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-zinc-400">Latest answer</span>
+                                        <span data-testid="journey-avail-latest" className={
+                                            data.availability_block.latest_availability === true ? 'text-emerald-400 font-medium' :
+                                            data.availability_block.latest_availability === false ? 'text-red-400 font-medium' :
+                                            'text-zinc-500'
+                                        }>
+                                            {data.availability_block.latest_availability === true ? 'YES' :
+                                             data.availability_block.latest_availability === false ? 'NO' : 'Not Answered'}
+                                        </span>
+                                    </div>
+                                    {data.availability_block.latest_reason_text && (
+                                        <div className="flex items-start justify-between gap-4">
+                                            <span className="text-zinc-400">Reason</span>
+                                            <span data-testid="journey-avail-reason" className="text-zinc-300 text-right">
+                                                {data.availability_block.latest_reason_text}
+                                                {data.availability_block.latest_other_text && ` — ${data.availability_block.latest_other_text}`}
+                                            </span>
+                                        </div>
+                                    )}
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-zinc-400">Withdrawal</span>
+                                        <span data-testid="journey-avail-withdrawn" className={
+                                            data.availability_block.withdrawn_by_candidate ? 'text-red-400 font-medium' : 'text-zinc-400'
+                                        }>
+                                            {data.availability_block.withdrawn_by_candidate ? `Withdrawn${data.availability_block.withdrawn_at ? ' at ' + String(data.availability_block.withdrawn_at).split('T')[0] : ''}` : 'Active'}
+                                        </span>
+                                    </div>
+                                    {data.availability_block.reactivation_count > 0 && (
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-zinc-400">Reactivations</span>
+                                            <span data-testid="journey-avail-reactivations" className="text-zinc-300">
+                                                {data.availability_block.reactivation_count}
+                                                {data.availability_block.reactivated_at && ` (latest ${String(data.availability_block.reactivated_at).split('T')[0]})`}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {data.availability_block.booked_date && (
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-zinc-400">Booked interview</span>
+                                            <span className="text-zinc-300" data-testid="journey-avail-booked">
+                                                {data.availability_block.booked_date} {data.availability_block.booked_time}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {data.availability_block.history && data.availability_block.history.length > 0 && (
+                                        <details className="mt-2" data-testid="journey-avail-history">
+                                            <summary className="cursor-pointer text-xs text-cyan-400 hover:text-cyan-300">
+                                                Full response history ({data.availability_block.history.length})
+                                            </summary>
+                                            <ul className="mt-2 space-y-1 text-xs text-zinc-400">
+                                                {data.availability_block.history.map((h, i) => (
+                                                    <li key={i} className="border-l border-zinc-800 pl-3">
+                                                        <span className="text-zinc-300">{h.response_type}</span>
+                                                        {h.availability === true ? ' · YES' : h.availability === false ? ' · NO' : ''}
+                                                        {h.reactivation_choice ? ` · ${h.reactivation_choice}` : ''}
+                                                        {h.reason_text ? ` · ${h.reason_text}` : ''}
+                                                        <span className="ml-2 text-zinc-500">{String(h.submitted_at || '').split('T')[0]}</span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </details>
+                                    )}
+                                </div>
+                            </section>
+                        )}
                     </div>
                 )}
             </div>

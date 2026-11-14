@@ -60,6 +60,13 @@ def eligibility(b: dict) -> list:
         r.append("SUPERSEDED")
     if b.get("isTest") is True:
         r.append("TEST_RECORD")
+    # Enhancement 1 — confirmed withdrawal suppresses BOTH call purposes.
+    if b.get("withdrawn_by_candidate") is True:
+        r.append("WITHDRAWN")
+    # Enhancement 1 — latest in-person availability is NO (strict identity;
+    # a `null`/missing value means "not answered" and MUST NOT suppress).
+    if b.get("chennai_availability_latest") is False:
+        r.append("LATEST_AVAILABILITY_NO")
     st = b.get("status") or ""
     if st not in BOOKED_STATUSES:
         r.append(STATUS_REASON.get(st, "MANUAL_ALERT_BOOKING" if st == "Scheduled" else "UNKNOWN_STATUS"))
