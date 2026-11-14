@@ -612,6 +612,13 @@ def _validate_draft(cfg: dict) -> dict:
                     status_code=400,
                     detail=f"These reserved reason IDs must remain: {sorted(missing_reserved)}",
                 )
+            # At least one active reason must exist, and 'other' must stay active
+            # so candidates can always submit NO with a free-form note.
+            active_ids_ = {o["id"] for o in cleaned if o.get("active", True)}
+            if not active_ids_:
+                raise HTTPException(status_code=400, detail="At least one reason must be active.")
+            if "other" not in active_ids_:
+                raise HTTPException(status_code=400, detail="The 'other' reason must remain active.")
             out[k] = cleaned
         else:
             if not isinstance(v, str) or not v.strip():
@@ -623,7 +630,10 @@ def _validate_draft(cfg: dict) -> dict:
 @avail_admin_router.get("/availability-question/draft")
 async def admin_get_draft(request: Request):
     user = await _require_auth(request)
-    username = (user.get("username") if isinstance(user, dict) else getattr(user, "username", None)) or "unknown"
+    username = user if isinstance(user, str) else (
+        (user.get("username") if isinstance(user, dict) else getattr(user, "username", None))
+        or "unknown"
+    )
     doc = await _db.bb_availability_question_drafts.find_one({"username": username})
     if not doc:
         # Seed draft with current config so admins see something.
@@ -637,7 +647,10 @@ async def admin_get_draft(request: Request):
 @avail_admin_router.post("/availability-question/draft")
 async def admin_save_draft(request: Request, body: DraftBody):
     user = await _require_auth(request)
-    username = (user.get("username") if isinstance(user, dict) else getattr(user, "username", None)) or "unknown"
+    username = user if isinstance(user, str) else (
+        (user.get("username") if isinstance(user, dict) else getattr(user, "username", None))
+        or "unknown"
+    )
     cleaned = _validate_draft(body.config)
     cur = await _get_current_config()
     now = _now_iso()
@@ -662,7 +675,10 @@ async def admin_publish(request: Request, body: DraftBody):
     `question_version` and `reason_text` it was captured with.
     """
     user = await _require_auth(request)
-    username = (user.get("username") if isinstance(user, dict) else getattr(user, "username", None)) or "unknown"
+    username = user if isinstance(user, str) else (
+        (user.get("username") if isinstance(user, dict) else getattr(user, "username", None))
+        or "unknown"
+    )
     cleaned = _validate_draft(body.config)
     cur = await _get_current_config()
     next_version = int(cur.get("version") or 1) + 1

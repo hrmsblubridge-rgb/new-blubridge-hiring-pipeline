@@ -1,9 +1,45 @@
-# PRD — BluBridge Hiring Website · AI Calling Module
+## Stage F (Nov 2026) — Enhancement 1: Chennai availability + withdrawal + reactivation
+
+### New backend surface (`/app/backend/bb_availability.py`)
+Public (token-based):
+- `GET  /api/pub/availability/{token}` — returns `{config, candidate}` with latest answer + booking + withdrawn flags.
+- `POST /api/pub/availability/{token}` — submit YES/NO + reason (`reason_id` from active list; `other` requires `other_text` ≤50 chars, pydantic 422 if over).
+- `POST /api/pub/availability/{token}/withdraw` — final idempotent withdrawal (requires `confirmed:true` and latest=false).
+- `POST /api/pub/availability/{token}/reactivate` — `choice:"yes" | "no" | "other"` for previously-withdrawn candidates.
+
+Admin (session cookie):
+- `GET  /api/bb/availability-question/current`
+- `GET  /api/bb/availability-question/draft`
+- `POST /api/bb/availability-question/draft` — strict validator keeps reserved IDs and requires ≥1 active reason incl. `other`.
+- `POST /api/bb/availability-question/publish` — bumps version, writes to `_versions` + `_audit`, soft-rebases the draft.
+- `GET  /api/bb/availability-question/versions`
+- `GET  /api/bb/availability-question/audit`
+
+### Guards / eligibility deltas
+- `POST /api/pub/schedule/{token}` now returns 409 if `withdrawn_by_candidate=true` OR `chennai_availability_latest is not True`.
+- `bg_workers.py` 24h reminder + missed-interview filters add `withdrawn_by_candidate:{$ne:true}`. NO-without-withdrawal still receives reminders (report-only, per spec Task 10).
+- `ai_calling/dryrun.py:eligibility()` adds `WITHDRAWN` when `withdrawn_by_candidate=true` and `LATEST_AVAILABILITY_NO` when the field is strictly False. `null` and `True` are not exclusions.
+
+### Frontend
+- `components/AvailabilityGate.jsx` — single component wrapping question / reason / withdraw / reactivation flows. Formatted date/time, Back button on reason, confirmation on "NO + keep active".
+- `pages/InterviewSchedule.js` now hides the slot picker until availability is persisted as YES.
+- `pages/ai-calling/InterviewAvailabilitySettings.js` — Edit / Preview / Versions / Audit tabs.
+- `components/AppShell.js` sidebar — new "Chennai Availability" entry.
+- `components/CandidateJourneyModal.jsx` — Chennai availability section + Needs HR Review badge.
+
+### Tests
+- `backend/tests/test_enhancement1_availability.py` — 33 tests covering read/write, gate, withdrawal, reactivation, admin, eligibility. Testing-agent iter64: backend 100% (106/106 + 23 new), frontend flows all pass after fix.
+- Bugs surfaced by iter64 and fixed in-session: admin username='unknown', all-inactive reasons allowed, reactivation UX double-ask, missing nav link, Publish contrast, raw date/time in notice.
+
+
+# PRD — BluBridge Hiring Website · AI Calling Module + Enhancement 1
 
 ## Product goal
 Hiring website (React + FastAPI + MongoDB) scheduling offline interviews. AI Calling module
 (Bolna) handles pre-interview confirmation + OTP-based missed-interview follow-up. Real dispatch
 is gated behind independent safety controls; preview is strictly mock-only.
+**Enhancement 1 (Nov 2026)** adds a Chennai in-person availability gate before every scheduling
+or rescheduling action, with withdrawal and reactivation flows.
 
 ## Non-negotiable safety invariants
 - Preview Mongo: `hiring_ai_testing` only. Never `hr_analytics` (production).
@@ -27,7 +63,16 @@ is gated behind independent safety controls; preview is strictly mock-only.
   `ai_candidate_consents`.
 - Added by Slice 3: `ai_admin_authorizations`, `ai_admin_authorization_audit`,
   `ai_consent_drafts`, `ai_consent_versions`.
-- All additive. No existing document schema altered.
+- Added by **Enhancement 1**: `bb_availability_responses` (append-only history),
+  `bb_availability_question_config` (one `_id="current"` doc), `bb_availability_question_drafts`,
+  `bb_availability_question_versions`, `bb_availability_question_audit`. `bb_registrations` gets
+  additive optional fields: `chennai_availability_latest`, `chennai_availability_latest_at`,
+  `chennai_availability_reason_id`, `chennai_availability_reason_text`,
+  `chennai_availability_other_text`, `withdrawn_by_candidate`, `withdrawn_at`,
+  `withdrawal_reason_id/text/other`, `reactivated_at`, `reactivation_count`,
+  `needs_hr_review`, `needs_hr_review_reason`, `needs_hr_review_at`.
+- All additive. No existing document schema altered. Null-availability on legacy bookings is
+  treated as "Not Answered" and does NOT suppress bookings, OTP, AI calls or reminders.
 
 ## What's implemented
 ### Slice 1 — unified authoritative safety status

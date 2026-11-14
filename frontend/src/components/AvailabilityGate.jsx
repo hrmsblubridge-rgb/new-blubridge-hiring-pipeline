@@ -16,6 +16,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
+import { formatDateDDMMYYYY as fmtDate, formatTime12H as fmtTime } from '../utils/dateFormat';
 
 const API = process.env.REACT_APP_BACKEND_URL;
 
@@ -128,8 +129,12 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
             if (reactChoice === 'no') setThanks(config.reactivation_no_confirmation);
             else if (reactChoice === 'other') setThanks(config.reactivation_other_confirmation);
             else {
-                // YES → reset wizard so booking flow continues.
-                setChoice(null); setThanks('');
+                // YES: backend already set chennai_availability_latest=true and cleared
+                // withdrawn_by_candidate. Hand off directly to the slot picker rather
+                // than re-asking the main question.
+                setChoice(true);
+                setThanks('');
+                onAllowBooking?.();
             }
         } catch (e) {
             alert(e.response?.data?.detail || 'Could not process your request.');
@@ -220,10 +225,22 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
     }
 
     if (mode === 'no_reason') {
+        // Confirmation for "NO + keep application active": once the reason
+        // is saved AND user picked withdraw=false we show a clear thank-you
+        // state so there is no dead-end (reported in iter64 testing).
+        const noWithdrawConfirmed =
+            candidate.latest_availability === false &&
+            withdrawDecision === false &&
+            candidate.latest_reason_id;
         return (
             <Section testid="availability-no-reason">
                 {priorBanner()}
-                <p className="text-gray-800 text-sm font-medium">{config.reason_question}</p>
+                <div className="flex items-center justify-between">
+                    <p className="text-gray-800 text-sm font-medium">{config.reason_question}</p>
+                    <button type="button" onClick={() => { setChoice(null); setReasonId(''); setOtherText(''); setWithdrawDecision(null); }}
+                            data-testid="reason-back"
+                            className="text-xs text-blue-600 hover:underline">← Change my answer</button>
+                </div>
                 <select value={reasonId} onChange={e => setReasonId(e.target.value)}
                         data-testid="reason-select"
                         className="w-full border border-gray-300 rounded p-2 text-sm">
@@ -244,12 +261,14 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
                         </div>
                     </>
                 )}
-                <button onClick={() => submitAvailability(false)}
-                        disabled={submitting || !reasonId || (reasonId === 'other' && !otherText.trim())}
-                        data-testid="reason-submit"
-                        className="w-full py-3 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg disabled:opacity-50">
-                    {submitting ? 'Saving…' : 'Submit reason'}
-                </button>
+                {!candidate.latest_reason_id && (
+                    <button onClick={() => submitAvailability(false)}
+                            disabled={submitting || !reasonId || (reasonId === 'other' && !otherText.trim())}
+                            data-testid="reason-submit"
+                            className="w-full py-3 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg disabled:opacity-50">
+                        {submitting ? 'Saving…' : 'Submit reason'}
+                    </button>
+                )}
 
                 {/* Explanation of in-person-only policy */}
                 {candidate.latest_availability === false && (
@@ -271,15 +290,28 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
                                onChange={() => setWithdrawDecision(false)} testid="wd-no">
                             {config.withdraw_no_label}
                         </Radio>
-                        {withdrawDecision === false && candidate.has_booking && (
+                        {noWithdrawConfirmed && (
+                            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900"
+                                 data-testid="keep-active-confirmation">
+                                Your application remains active. You can return to this link later to update your answer.
+                                {candidate.has_booking && candidate.booking && (
+                                    <div className="mt-2 text-emerald-950">
+                                        <div><b>Current booking (preserved):</b></div>
+                                        <div data-testid="booked-no-date">Date: {fmtDate(candidate.booking.schedule_date)}</div>
+                                        <div data-testid="booked-no-time">Time: {fmtTime(candidate.booking.schedule_time)}</div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        {withdrawDecision === false && !noWithdrawConfirmed && candidate.has_booking && (
                             <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900"
                                  data-testid="booked-no-notice">
                                 {config.booked_no_notice}
-                                {bookedDetails && (
+                                {bookedDetails && candidate.booking && (
                                     <div className="mt-2 text-amber-950">
                                         <div><b>Current booking:</b></div>
-                                        <div data-testid="booked-no-date">Date: {candidate.booking?.schedule_date}</div>
-                                        <div data-testid="booked-no-time">Time: {candidate.booking?.schedule_time}</div>
+                                        <div data-testid="booked-no-date">Date: {fmtDate(candidate.booking.schedule_date)}</div>
+                                        <div data-testid="booked-no-time">Time: {fmtTime(candidate.booking.schedule_time)}</div>
                                     </div>
                                 )}
                             </div>

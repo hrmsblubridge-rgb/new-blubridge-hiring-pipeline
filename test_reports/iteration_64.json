@@ -1,0 +1,47 @@
+{
+  "summary": "Enhancement 1 (Chennai availability gate / withdrawal / reactivation) verified end-to-end on hiring_ai_testing. Backend: main agent's 33-test suite + 5 safety regression suites = 83/83 pass; my independent suite test_e1_availability_iter64.py = 23/23 pass (GET config/404, YES/NO validation incl. 422 on >50-char other_text, nonce idempotency, OTP untouched, schedule 409 gate for null/NO/withdrawn and 200 after YES, booked YES->NO keeps booking + needs_hr_review surfaced in candidate-journey availability_block + cleared on YES, withdraw 400/409/idempotent, reactivate 409/400/422/yes, company-rejection 409, admin 401 unauth, reserved-ID 400, publish bumps version/versions/audit/draft rebased, eligibility WITHDRAWN/LATEST_AVAILABILITY_NO with null/true eligible and ordering intact, bg_workers filters). Frontend: gate shows first, slot picker hidden until YES persisted, NO->reason select, other->counter caps at 50/50, withdraw checkbox gates Confirm button, thank-you + reactivation after reload, booked NO notice, admin settings page (no useWorkflow error) tabs edit/preview/versions/audit, Save Draft + Publish via UI succeed, journey modal shows availability section with Needs HR Review badge. One real bug found: admin username always recorded as 'unknown'.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/bb/availability-question/publish, /draft, GET /draft", "issue": "server.get_current_user returns a plain str username, but bb_availability.py extracts it via user.get('username')/getattr(user,'username') -> None -> 'unknown'. Result: audit rows and versions show 'by unknown' (seen in UI Versions/Audit tabs) and all admins share ONE draft doc keyed username='unknown'. Fix: username = user if isinstance(user, str) else (user.get('username') ...)."},
+      {"endpoint": "POST /api/bb/availability-question/draft|publish", "issue": "_validate_draft allows all reason options to be set active=false (incl. 'other') -> candidate can no longer submit NO at all (every reason 400). Enforce at least one active reason (ideally keep 'other' always active)."},
+      {"endpoint": "POST /api/bb/availability-question/publish", "issue": "Non-atomic version bump: two concurrent publishes compute the same next_version; versions upsert uses $setOnInsert so the second publish's snapshot is lost while config holds the second content. Low risk (admin-only)."},
+      {"endpoint": "POST /api/pub/availability/{token}/withdraw & /reactivate", "issue": "Read-then-update without a conditional filter (e.g. {withdrawn_by_candidate: {$ne: true}}); concurrent double-clicks can append two withdrawal/reactivation history rows when no nonce is sent (frontend never sends submission_nonce)."},
+      {"endpoint": "POST /api/pub/schedule/{token}", "issue": "Pre-existing (not E1): public unauthenticated response includes the interview OTP ({\"otp\":\"771427\"}). Flagging for awareness only."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "AvailabilityGate reactivation", "issue": "After Reactivate YES succeeds (backend already sets chennai_availability_latest=true), UI resets to the main 'ask' question instead of opening the slot picker; candidate must answer YES a second time.", "selector": "[data-testid='react-submit']", "priority": "MEDIUM"},
+      {"component": "AvailabilityGate no_reason", "issue": "Once NO radio is clicked the wizard switches to reason screen with no Back/Change-to-YES control; misclick requires page reload.", "selector": "[data-testid='avail-no']", "priority": "LOW"},
+      {"component": "AvailabilityGate withdraw question", "issue": "Choosing 'NO — Keep my application active' (wd-no) for a non-booked candidate shows nothing (dead end, no confirmation). 'Submit reason' button also remains visible after reason was saved.", "selector": "[data-testid='wd-no']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/settings/interview-availability", "issues": ["Page is not linked from sidebar or AI Calling menu (only reachable by typing URL)", "'Publish New Version' button: dark green text on green background — low contrast"]},
+      {"screen": "Booked NO notice / Journey availability", "issues": ["Booking date/time shown raw ('2030-04-07', '2030-04-07 11:00:00') instead of dd-mm-yyyy / hh:mm AM/PM used elsewhere on the same page"]},
+      {"screen": "AvailabilityGate", "issues": ["Errors surfaced via native window.alert instead of inline/toast"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_e1_availability_iter64.py", "/app/backend/tests/test_enhancement1_availability.py", "/app/test_reports/pytest/e1_avail.xml", "/app/test_reports/pytest/e1_iter64.xml"],
+  "action_items": [
+    "Fix username extraction in bb_availability.py (get_current_user returns str) so audit/versions/drafts record the real admin",
+    "After reactivation YES, hand off directly to slot picker (call onAllowBooking / setChoice(true)) instead of re-asking",
+    "Validate at least one active reason (keep 'other' active) in _validate_draft",
+    "Add sidebar/AI Calling link to /settings/interview-availability; fix Publish button contrast",
+    "Optional: atomic conditional updates for withdraw/reactivate/publish; send submission_nonce from frontend; Back button on reason screen; confirmation for 'keep active'; format booked date/time"
+  ],
+  "critical_code_review_comments": [
+    "bb_availability.py is 726 lines (>700) — consider splitting admin config endpoints into a separate module",
+    "Frontend never sends submission_nonce, so the unique-nonce idempotency only protects API clients that supply one",
+    "Schedule gate correctly placed before OTP lock; bg_workers 24h (L448) and missed (L551) filters exclude withdrawn only, NO-without-withdrawal still reminded as specified",
+    "candidate-journey availability_block lookup uses $or email/phone sorted by registered_at — if phone is shared across registrations it may surface another person's row"
+  ],
+  "updated_files": ["/app/backend/tests/test_e1_availability_iter64.py"],
+  "success_rate": {"backend": "100% (106/106 tests; 1 minor functional bug found by UI: admin username 'unknown')", "frontend": "95% (all requested flows pass; reactivation UX double-ask)"},
+  "test_credentials": "Admin User / QAZwsx##123 works. /app/memory/test_credentials.md still lists password 'Admin User' — file is STALE, update it to QAZwsx##123.",
+  "seed_data_creation": "Created e1test-* bb_registrations, their bb_availability_responses and 2 pipeline_data rows (e1test-*@example.test); all deleted by exact token/email lists, residue scan clean. Availability config published twice (v1->v2 via API, v2->v3 via UI) with UNCHANGED content; versions/audit rows added in hiring_ai_testing.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: cd /app/backend && set -a && . ./.env && . ../frontend/.env && set +a && python -m pytest tests/test_e1_availability_iter64.py tests/test_enhancement1_availability.py -n0 -p no:randomly. Candidate-journey requires a pipeline_data row (seed with unique email/phone). Verify username fix by checking Versions/Audit tab shows 'Admin User'. Safety switches untouched; AI_CALLING_ENABLED=false, ENABLE_WHATSAPP/EMAIL=false."
+}

@@ -174,7 +174,7 @@ export default function InterviewAvailabilitySettings() {
                                 Save Draft
                             </button>
                             <button onClick={publish} disabled={busy} data-testid="avail-publish"
-                                    className="px-4 py-2 bg-emerald-800 hover:bg-emerald-700 text-sm">
+                                    className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white text-sm font-semibold">
                                 Publish New Version
                             </button>
                         </div>
