@@ -84,8 +84,8 @@ async def call_now(cid: str, request: Request, body: dict = Body(...)):  # noqa:
     if str(body.get("confirm_name") or "").strip() != str(cand.get("candidate_name") or "").strip() or not cand.get("candidate_name"):
         raise HTTPException(400, "Type the candidate's exact name to authorise this call")
     purpose = body.get("call_purpose") or "interview_confirmation"
-    if purpose not in ("interview_confirmation", "missed_interview_followup"):
-        raise HTTPException(400, "call_purpose must be interview_confirmation or missed_interview_followup")
+    if purpose not in ("interview_confirmation", "missed_interview_followup", "booking_confirmation"):
+        raise HTTPException(400, "call_purpose must be interview_confirmation, missed_interview_followup, or booking_confirmation")
     if await db().ai_calls.find_one({"mode": "testing", "state": {"$in": BLOCKING}}, {"_id": 1}):
         raise HTTPException(409, "Another test call is still unresolved. Wait for its result or review it first.")
 

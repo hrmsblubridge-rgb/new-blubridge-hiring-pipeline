@@ -1,0 +1,44 @@
+{
+  "summary": "Enhancement 2 Session 2 sweep (backend + frontend). Backend: new iter66 suite 25/26 pass + E1's test_enhancement2_booking_confirm.py 13/13 (only with PYTHONPATH=/app/backend). Scheduling GET/PUT booking_confirmation + bolna_backup_agent contract, range/type/CSRF validation, activation stamp immutability, test-batch call_purpose whitelist, interview-reports ai_calls/ai_needs_hr_review, export-fields ai_calling section, xlsx/csv export with AI columns (empty + seeded), candidate-journey ai_calls_block (null + populated) all verified. Frontend: SchedulingPanel Booking card (toggle/target/retry, validation toast, save persists after reload), Bolna Backup DISABLED badge, BatchPanel mandatory scenario selector (Create disabled until candidate+scenario), Interview Reports AI CALL column with outcome + HR Review badge, Export modal AI Calling Fields section, Candidate Journey modal AI Call Results rows + Needs HR Review badge all working. Used a temporary TEST_ seed (pipeline_data + bb_registrations) to exercise populated paths; cleaned up by id.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/ai-calling/test-batches", "issue": "Missing call_purpose returns 422 (Pydantic required field) instead of the specified 400. Make BatchBody.call_purpose Optional[str] = None so the handler's 400 whitelist message is returned."},
+      {"endpoint": "POST /api/ai-calling/test-calls (dispatch.py:87)", "issue": "Manual single test-call dispatch still only allows interview_confirmation/missed_interview_followup; booking_confirmation is rejected, inconsistent with the new 3-scenario batch selector."},
+      {"endpoint": "ai_calling/purposes.py _mirror_latest_result", "issue": "concise_reason uses MISSED_REASON_MAP for all purposes, so booking/confirmation outcomes like CONFIRMED get an empty concise_reason; export columns 'AI Booking Call - Concise Reason' / 'AI Interview Confirmation - Concise Reason' will mostly be blank."},
+      {"endpoint": "bb_modules._format_iso_dt", "issue": "Docstring says IST, but the timestamp is rendered in UTC with no zone label (e.g. '2026-11-14 13:12'). Verified At/Delivered At columns may confuse HR."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CandidateJourneyModal AI Call Results", "issue": "The section only renders when ai_calls_block is non-null, and the backend returns null when no verified call exists. So candidates without AI data show no section and none of the 'No verified call yet' placeholders the spec expects. Either always render the section, or have the backend always return an object.", "selector": "[data-testid='journey-ai-call-results']", "priority": "MEDIUM"},
+      {"component": "CandidateJourneyModal", "issue": "Duplicate data-testid 'journey-ai-calls' (also used by ProfileCallHistory) caused a strict-mode collision. FIXED by the tester: the new section was renamed to 'journey-ai-call-results'.", "selector": "[data-testid='journey-ai-call-results']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "AI Calling Settings > Booking Confirmation", "issues": ["'Activated YYYY-MM-DD (immutable)' shows in green while the toggle is OFF, which could be read as 'active'."]},
+      {"screen": "Testing Mode > Test batches", "issues": ["Batch rows do not show the selected call_purpose/scenario, so admins cannot tell which scenario a batch was created for."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter66_enh2_session2_api.py", "/app/backend/tests/_ui_seed_iter66.py", "/app/backend/tests/test_enhancement2_booking_confirm.py", "/app/test_reports/pytest/iter66.xml"],
+  "action_items": [
+    "Make missing call_purpose on POST /api/ai-calling/test-batches return 400 (Optional field), or update the spec/tests to accept 422",
+    "Render the Candidate Journey 'AI Call Results' section with 'No verified call yet' placeholders even when there is no verified call (backend returns ai_calls_block=null today)",
+    "Map concise_reason for booking_confirmation/interview_confirmation outcomes too, not just the missed-interview map",
+    "Optional: allow booking_confirmation in the manual test-call dispatch (dispatch.py), show call_purpose on batch rows, and label export timestamps with their timezone (UTC) or convert them to IST",
+    "Note: test_enhancement2_booking_confirm.py needs PYTHONPATH=/app/backend (it fails with ModuleNotFoundError: ai_calling otherwise). Add a sys.path insert or a conftest."
+  ],
+  "critical_code_review_comments": [
+    "put_scheduling: the activation stamp is computed before range validation. It is harmless because the request raises before writing, but the validation should move first for clarity.",
+    "_enrich_rows_with_ai_calls picks the bb_registrations row by the latest schedule_date per email and does not exclude superseded rows. A superseded booking's AI results could surface if it has a later schedule_date.",
+    "SchedulingPanel save sends the whole form, including booking_enabled, every time. A save while ON is fine because the stamp is only set when absent.",
+    "bb_modules.py is several thousand lines long and should be split into modules."
+  ],
+  "updated_files": ["/app/frontend/src/components/CandidateJourneyModal.jsx (testid rename journey-ai-calls -> journey-ai-call-results on the new section)", "/app/backend/tests/test_iter66_enh2_session2_api.py (new)", "/app/backend/tests/_ui_seed_iter66.py (new)"],
+  "success_rate": {"backend": "96% (25/26 iter66; 13/13 E1 suite)", "frontend": "92% (all requested flows work; the no-data placeholder is missing)"},
+  "seed_data_creation": "Temporary TEST_ pipeline_data + bb_registrations rows (email test_iter66_ai@test.local) with ai_call_results were created for the UI checks and deleted by id afterwards (verified count 0). Side effect: the iter66 activation-stamp test flipped booking_enabled ON and then OFF, which stamped ai_call_settings.booking_activated_at=2026-11-14T13:11:15Z in hiring_ai_testing (immutable by design; booking_enabled restored to false, target 3, retry 30). No batches, calls, or messages were created. DB hiring_ai_testing; AI_CALLING_ENABLED=false; Emergency Stop ON.",
+  "test_credentials": "Admin User / QAZwsx##123 works (TEST_ADMIN_PASSWORD in backend/.env). /app/memory/test_credentials.md is stale: it lists the password as 'Admin User'. Please update it.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: cd /app/backend && export REACT_APP_BACKEND_URL=... PYTHONPATH=/app/backend && pytest tests/test_iter66_enh2_session2_api.py tests/test_enhancement2_booking_confirm.py -p no:xdist. To seed a populated AI-call row for the UI: python tests/_ui_seed_iter66.py seed, then cleanup when done. Interview Reports defaults to today's date, so click 'All Records' to see rows. Candidate Journey: /candidate-journey, search 'test_iter66', then click journey-search-card-0. The test candidate row checkbox is input[data-testid^=select-] in CandidateList."
+}

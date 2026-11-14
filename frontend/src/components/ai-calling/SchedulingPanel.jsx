@@ -66,9 +66,14 @@ export const SchedulingPanel = () => {
                         ASAP within window {bc.window ? `${bc.window[0]}–${bc.window[1]}` : '10:00–19:00'} IST.
                         Minimum 6 h gap before any Interview Confirmation call on the same booking.
                     </p>
-                    {bc.activated_at && (
+                    {bc.activated_at && f.booking_enabled && (
                         <p className="text-[11px] text-emerald-700" data-testid="booking-activated-at">
                             Activated {String(bc.activated_at).slice(0, 10)} (immutable).
+                        </p>
+                    )}
+                    {bc.activated_at && !f.booking_enabled && (
+                        <p className="text-[11px] text-[#6b7280]" data-testid="booking-activated-at-off">
+                            First activated {String(bc.activated_at).slice(0, 10)} (stamp is immutable; toggle currently OFF).
                         </p>
                     )}
                 </div>

@@ -2730,14 +2730,19 @@ EXPORT_FIELD_BY_KEY = {e[0]: e for e in EXPORT_FIELD_CATALOG}
 
 
 def _format_iso_dt(s) -> str:
-    """ISO-8601 → 'YYYY-MM-DD HH:MM' IST-ish rendering for Excel/CSV."""
+    """ISO-8601 → 'YYYY-MM-DD HH:MM UTC' rendering for Excel/CSV exports.
+
+    iter66 fix — The underlying ai_call_results stamps are stored in UTC
+    (now_iso() returns UTC ISO-8601). We render them verbatim with a 'UTC'
+    suffix so HR cannot mistake them for IST. If parsing fails we fall back
+    to the first 16 chars of the raw string (still unambiguous)."""
     if not s:
         return ""
     try:
         from datetime import datetime as _dt
-        return _dt.fromisoformat(str(s).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+        return _dt.fromisoformat(str(s).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
-        return str(s)[:19].replace("T", " ")
+        return (str(s)[:19].replace("T", " ") + " UTC").strip()
 
 
 async def _enrich_rows_with_ai_calls(docs: list) -> None:

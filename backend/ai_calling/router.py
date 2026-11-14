@@ -402,8 +402,9 @@ class BatchBody(BaseModel):
     candidate_ids: List[str]
     # Enhancement 2 §27A — mandatory test-call scenario selector. Backend
     # enforces the same whitelist that the UI shows, so API clients cannot
-    # bypass it.
-    call_purpose: str
+    # bypass it. Kept Optional so the handler can return a 400 with the
+    # whitelist message (instead of Pydantic's generic 422) when it's missing.
+    call_purpose: Optional[str] = None
 
     @classmethod
     def _valid_purposes(cls):

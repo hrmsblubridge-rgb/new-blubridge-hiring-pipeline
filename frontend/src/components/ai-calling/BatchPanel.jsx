@@ -62,7 +62,12 @@ export const BatchPanel = ({ selected, clearSelected, batches, reload, startEnab
                     <div key={b.id} className="flex flex-wrap items-center gap-2 border border-[#efede5] rounded-xl px-3 py-2.5" data-testid={`batch-row-${b.id}`}>
                         <div className="flex-1 min-w-[180px]">
                             <p className="text-sm font-semibold text-[#1a2332]">{b.name}</p>
-                            <p className="text-xs text-[#6b7280]">{b.candidate_ids.length} recipient(s) · status: <b>{b.status}</b> · mode v{b.mode_version}</p>
+                            <p className="text-xs text-[#6b7280]">
+                                {b.candidate_ids.length} recipient(s) · status: <b>{b.status}</b> · mode v{b.mode_version}
+                                {b.call_purpose && (
+                                    <> · scenario: <b data-testid={`batch-row-${b.id}-purpose`} className="text-teal-800">{PURPOSES.find(p => p.value === b.call_purpose)?.label || b.call_purpose}</b></>
+                                )}
+                            </p>
                         </div>
                         <button onClick={() => preflight(b)} data-testid={`batch-preflight-${b.id}`} className="px-3 py-2 rounded-lg border border-[#e5e3d8] bg-white text-xs font-semibold hover:bg-[#efede5]">Run safety check</button>
                         <button disabled={!startEnabled} title={startEnabled ? '' : 'Disabled until Bolna API integration is approved'} data-testid={`batch-start-${b.id}`}

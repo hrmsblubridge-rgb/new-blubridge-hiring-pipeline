@@ -242,6 +242,31 @@ MISSED_REASON_MAP = {
     "UNKNOWN": "Unknown",
 }
 
+# iter66 fix — Concise reason labels for booking/pre-interview confirmation
+# outcomes. Previously only the missed-interview map was applied, so booking
+# or confirmation calls stored an empty concise_reason and the Excel/CSV
+# "Concise Reason" columns rendered blank for CONFIRMED / RESCHEDULE / etc.
+CONFIRM_REASON_MAP = {
+    "CONFIRMED": "Confirmed",
+    "CONFIRMED_ON_RETRY": "Confirmed on retry",
+    "RESCHEDULE_REQUESTED": "Requested reschedule",
+    "DECLINED": "Declined",
+    "DO_NOT_CALL": "Do not call",
+    "WRONG_NUMBER": "Wrong number",
+    "VIRTUAL_REQUESTED": "Virtual requested",
+    "NO_ANSWER": "No answer",
+    "BUSY": "Busy",
+    "UNKNOWN": "Unknown",
+}
+
+
+def _concise_reason(purpose: str, outcome: str) -> str:
+    """Pick the right concise-reason label for the given call purpose."""
+    if purpose == MISSED:
+        return MISSED_REASON_MAP.get(outcome, "")
+    # booking_confirmation + interview_confirmation share a vocabulary
+    return CONFIRM_REASON_MAP.get(outcome, MISSED_REASON_MAP.get(outcome, ""))
+
 
 def _needs_hr_review(purpose: str, outcome: str) -> bool:
     """Outcomes that require human follow-up regardless of auto-actions."""
@@ -283,7 +308,7 @@ async def _mirror_latest_result(reg_id: str, booking_key_val: str, purpose: str,
         "execution_id": (job.get("mock_call") or {}).get("execution_id"),
         "attendance_at_call": "verified" if reg.get("otp_verified") in TRUTHY_OTP else (
             "not_verified" if reg.get("otp_verified") in ("", False) else "unknown"),
-        "concise_reason": MISSED_REASON_MAP.get(outcome, ""),
+        "concise_reason": _concise_reason(purpose, outcome),
         "preferred_reschedule_datetime": extracted.get("preferred_reschedule_datetime"),
         "needs_hr_review": _needs_hr_review(purpose, outcome),
     }

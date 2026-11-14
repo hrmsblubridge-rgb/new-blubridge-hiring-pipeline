@@ -195,34 +195,45 @@ export default function CandidateJourneyModal({ candidate, onClose }) {
                         <ProfileCallHistory email={data.basic.email} />
                         <ProfileConsentPanel email={data.basic.email} />
 
-                        {/* Enhancement 2 Session 2 — Latest verified AI-call results per purpose */}
-                        {data.ai_calls_block && (
-                            <section data-testid="journey-ai-calls">
+                        {/* Enhancement 2 Session 2 — Latest verified AI-call results per purpose.
+                            iter66 fix — Always render the section so candidates without any
+                            verified call still show the "No verified call yet" placeholders. */}
+                        {(() => {
+                            const acb = data.ai_calls_block || {
+                                booking_confirmation: null,
+                                interview_confirmation: null,
+                                missed_interview_followup: null,
+                                reschedule_link: null,
+                                needs_hr_review: false,
+                            };
+                            return (
+                            <section data-testid="journey-ai-call-results">
                                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3 flex items-center gap-2">
                                     AI Call Results
-                                    {data.ai_calls_block.needs_hr_review && (
+                                    {acb.needs_hr_review && (
                                         <span data-testid="journey-ai-needs-review" className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-900/40 text-amber-300 border-amber-800/50">
                                             Needs HR Review
                                         </span>
                                     )}
                                 </h3>
                                 <div className="border border-zinc-800 bg-zinc-900/50 divide-y divide-zinc-800">
-                                    <AiCallRow label="Booking Confirmation" testid="ai-booking" latest={data.ai_calls_block.booking_confirmation} />
-                                    <AiCallRow label="Pre-Interview Confirmation" testid="ai-confirm" latest={data.ai_calls_block.interview_confirmation} />
-                                    <AiCallRow label="Missed-Interview Follow-up" testid="ai-missed" latest={data.ai_calls_block.missed_interview_followup} />
-                                    {data.ai_calls_block.reschedule_link && (
+                                    <AiCallRow label="Booking Confirmation" testid="ai-booking" latest={acb.booking_confirmation} />
+                                    <AiCallRow label="Pre-Interview Confirmation" testid="ai-confirm" latest={acb.interview_confirmation} />
+                                    <AiCallRow label="Missed-Interview Follow-up" testid="ai-missed" latest={acb.missed_interview_followup} />
+                                    {acb.reschedule_link && (
                                         <div className="px-4 py-3 flex items-center justify-between text-sm" data-testid="ai-reschedule-link">
                                             <span className="text-zinc-400">Reschedule Link</span>
                                             <span className="text-zinc-300">
-                                                <code className="text-xs text-cyan-400">{data.ai_calls_block.reschedule_link.state}</code>
-                                                {data.ai_calls_block.reschedule_link.source && <> · from <code className="text-xs text-zinc-400">{data.ai_calls_block.reschedule_link.source}</code></>}
-                                                {data.ai_calls_block.reschedule_link.at && <span className="text-zinc-500 ml-2">{String(data.ai_calls_block.reschedule_link.at).slice(0, 10)}</span>}
+                                                <code className="text-xs text-cyan-400">{acb.reschedule_link.state}</code>
+                                                {acb.reschedule_link.source && <> · from <code className="text-xs text-zinc-400">{acb.reschedule_link.source}</code></>}
+                                                {acb.reschedule_link.at && <span className="text-zinc-500 ml-2">{String(acb.reschedule_link.at).slice(0, 10)}</span>}
                                             </span>
                                         </div>
                                     )}
                                 </div>
                             </section>
-                        )}
+                            );
+                        })()}
 
                         {/* Enhancement 1 — Chennai availability snapshot */}
                         {data.availability_block && (
