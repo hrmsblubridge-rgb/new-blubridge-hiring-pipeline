@@ -55,15 +55,23 @@ const PageShell = ({ children, testid }) => (
     </div>
 );
 
-// Enhancement 1 UI fix — compact 2-column detail cell. Uppercase label on top,
-// value underneath so a desktop layout can show six fields in three columns
-// without wrapping, and mobile falls back to a clean stacked list.
-const DetailCell = ({ label, value, testid }) => (
-    <div className="min-w-0">
-        <div className="text-[10px] font-bold tracking-widest text-gray-500 uppercase">{label}</div>
-        <div className="text-[15px] text-gray-900 font-medium break-words leading-snug" data-testid={testid}>{value || '—'}</div>
-    </div>
-);
+// Enhancement 1 UI fix — compact single-line detail cell. Uppercase label on top,
+// value underneath on one line. If the value is too long for the cell, it
+// truncates with an ellipsis and the full text is available on hover (title).
+const DetailCell = ({ label, value, testid, mono }) => {
+    const text = value || '—';
+    return (
+        <div className="min-w-0">
+            <div className="text-[10px] font-bold tracking-widest text-gray-500 uppercase">{label}</div>
+            <div
+                className={`text-[15px] text-gray-900 font-medium leading-snug whitespace-nowrap overflow-hidden text-ellipsis ${mono ? 'tabular-nums' : ''}`}
+                title={text}
+                data-testid={testid}>
+                {text}
+            </div>
+        </div>
+    );
+};
 
 export default function InterviewSchedule() {
     const { token } = useParams();
@@ -148,7 +156,7 @@ export default function InterviewSchedule() {
         const COMPANY_ADDRESS = '30, Norton Road, Mandavelipakkam, Raja Annamalai Puram, Chennai, Tamil Nadu - 600028';
         return (
             <PageShell testid="schedule-success">
-                <div className="w-full max-w-xl">
+                <div className="w-full max-w-2xl">
                     <div className="bg-[#fffdf7] rounded-2xl shadow-md overflow-hidden">
                         <div className="bg-[#1a2332] h-2 rounded-t-2xl"></div>
                         <div className="px-5 py-5 sm:px-7 sm:py-6 space-y-4">
@@ -181,7 +189,7 @@ export default function InterviewSchedule() {
 
     return (
         <PageShell testid="schedule-page">
-            <div className="w-full max-w-xl">
+            <div className="w-full max-w-2xl">
                 <div className="bg-[#fffdf7] rounded-2xl shadow-md overflow-hidden">
                     <div className="bg-[#1a2332] h-2 rounded-t-2xl"></div>
                     <div className="px-5 py-5 sm:px-7 sm:py-6 space-y-4">
@@ -200,15 +208,12 @@ export default function InterviewSchedule() {
                             <h3 id="interview-info-heading" className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">Interview Information</h3>
                             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
                                 <DetailCell label="Name"  value={info?.name}  testid="sched-name" />
-                                <DetailCell label="Phone" value={info?.phone} testid="sched-phone" />
-                                <div className="col-span-2 sm:col-span-1 min-w-0">
-                                    <div className="text-[10px] font-bold tracking-widest text-gray-500 uppercase">Email</div>
-                                    <div className="text-[15px] text-gray-900 font-medium break-all leading-snug" data-testid="sched-email">{info?.email || '—'}</div>
-                                </div>
+                                <DetailCell label="Phone" value={info?.phone} testid="sched-phone" mono />
+                                <DetailCell label="Email" value={info?.email} testid="sched-email" />
                                 {info?.already_scheduled && info?.schedule_date && (
                                     <>
-                                        <DetailCell label="Date" value={fmtDate(info.schedule_date)} testid="sched-current-date" />
-                                        <DetailCell label="Time" value={fmtTime(info.schedule_time)} testid="sched-current-time" />
+                                        <DetailCell label="Date" value={fmtDate(info.schedule_date)} testid="sched-current-date" mono />
+                                        <DetailCell label="Time" value={fmtTime(info.schedule_time)} testid="sched-current-time" mono />
                                     </>
                                 )}
                             </div>
