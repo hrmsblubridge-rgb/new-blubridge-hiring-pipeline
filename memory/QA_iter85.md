@@ -39,7 +39,7 @@
 | H1  | Update Applicants Scores | `/api/bb/attended-for-scores` returns tester                      | tester returned  | tester returned  | ✅ PASS |
 | I1  | View Attended            | Round columns are dynamically built + unique                      | 15 unique cols   | 15 unique cols   | ✅ PASS |
 | J1  | TEST_MODE                | `/api/messaging/status`                                           | `test_mode:false`| `test_mode:false`| ✅ PASS |
-| K1  | Auth                     | `/api/me` after login                                             | `Admin User`     | `Admin User`     | ✅ PASS |
+| K1  | Auth                     | `/api/me` after login                                             | `Admin User`     | *(password redacted — see `TEST_ADMIN_PASSWORD` in `backend/.env`; rotate before production)* | ✅ PASS |
 
 ---
 

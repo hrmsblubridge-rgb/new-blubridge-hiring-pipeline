@@ -19,33 +19,54 @@ a mutated state.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 
 # ---------------------------------------------------------------------------
-# 1. Hydrate REACT_APP_BACKEND_URL for API-style live tests.
+# 0. Make `/app/backend` importable so modules like `ai_calling` resolve even
+#    when pytest is invoked from a different CWD (fixes iter66 action item
+#    "ModuleNotFoundError: ai_calling without PYTHONPATH=/app/backend").
 # ---------------------------------------------------------------------------
-def _load_frontend_env_once() -> None:
-    if os.environ.get("REACT_APP_BACKEND_URL"):
-        return
-    env_file = Path("/app/frontend/.env")
-    if not env_file.exists():
-        return
-    for line in env_file.read_text().splitlines():
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent  # /app/backend
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+
+# ---------------------------------------------------------------------------
+# 1. Hydrate env vars needed by test modules at import time:
+#    - REACT_APP_BACKEND_URL (from frontend/.env) for HTTP-style regression suites.
+#    - MONGO_URL / DB_NAME (from backend/.env) for direct-DB fixture modules.
+#    None of this mutates the shell or long-lived process env.
+# ---------------------------------------------------------------------------
+def _parse_env_file(path: Path) -> dict:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
-        key = key.strip()
-        val = val.strip().strip('"').strip("'")
-        if key == "REACT_APP_BACKEND_URL" and val:
-            os.environ["REACT_APP_BACKEND_URL"] = val
-            break
+        out[key.strip()] = val.strip().strip('"').strip("'")
+    return out
 
 
-_load_frontend_env_once()
+def _hydrate_env_once() -> None:
+    frontend = _parse_env_file(Path("/app/frontend/.env"))
+    backend = _parse_env_file(Path("/app/backend/.env"))
+    for k, source in (
+        ("REACT_APP_BACKEND_URL", frontend),
+        ("MONGO_URL", backend),
+        ("DB_NAME", backend),
+    ):
+        if not os.environ.get(k) and source.get(k):
+            os.environ[k] = source[k]
+
+
+_hydrate_env_once()
 
 
 # ---------------------------------------------------------------------------

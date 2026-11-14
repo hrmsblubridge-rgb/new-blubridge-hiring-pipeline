@@ -51,7 +51,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from bson import ObjectId
-import asyncio, hashlib, logging, re, secrets, uuid
+import asyncio, hashlib, logging, os, re, secrets, uuid
 from _fmt import to_24h_db
 
 bb_router = APIRouter(prefix="/api/bb")
@@ -2730,19 +2730,33 @@ EXPORT_FIELD_BY_KEY = {e[0]: e for e in EXPORT_FIELD_CATALOG}
 
 
 def _format_iso_dt(s) -> str:
-    """ISO-8601 → 'YYYY-MM-DD HH:MM UTC' rendering for Excel/CSV exports.
+    """ISO-8601 UTC stamp → human string for Excel/CSV exports.
 
-    iter66 fix — The underlying ai_call_results stamps are stored in UTC
-    (now_iso() returns UTC ISO-8601). We render them verbatim with a 'UTC'
-    suffix so HR cannot mistake them for IST. If parsing fails we fall back
-    to the first 16 chars of the raw string (still unambiguous)."""
+    Storage remains UTC (ai_call_results.*.verified_at, reschedule_link_last_at,
+    etc. are written by now_iso() which returns UTC ISO-8601). The *display*
+    timezone is controlled by env var AI_EXPORT_TIMEZONE:
+
+      • "IST" / "Asia/Kolkata"  → convert and render 'YYYY-MM-DD HH:MM IST'
+      • anything else (default) → render UTC as 'YYYY-MM-DD HH:MM UTC'
+
+    The suffix is always explicit so HR cannot confuse one for the other.
+    """
     if not s:
         return ""
+    tz_pref = (os.environ.get("AI_EXPORT_TIMEZONE") or "UTC").strip()
+    want_ist = tz_pref.upper() in ("IST", "ASIA/KOLKATA", "INDIA", "KOLKATA")
     try:
-        from datetime import datetime as _dt
-        return _dt.fromisoformat(str(s).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M UTC")
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        dt = _dt.fromisoformat(str(s).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        if want_ist:
+            ist = _tz(_td(hours=5, minutes=30), name="IST")
+            return dt.astimezone(ist).strftime("%Y-%m-%d %H:%M IST")
+        return dt.astimezone(_tz.utc).strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
-        return (str(s)[:19].replace("T", " ") + " UTC").strip()
+        tag = "IST" if want_ist else "UTC"
+        return (str(s)[:19].replace("T", " ") + f" {tag}").strip()
 
 
 async def _enrich_rows_with_ai_calls(docs: list) -> None:
