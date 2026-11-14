@@ -25,7 +25,7 @@ export default function LiveMode() {
 
     return (
         <div className="min-h-screen" data-testid="ai-live-page">
-            <AICallingHeader title="Live Mode" subtitle="Two automatic calling workflows — dispatch remains blocked" />
+            <AICallingHeader title="Live Mode" subtitle="Three automatic calling workflows — dispatch remains blocked" />
             <main className="max-w-6xl mx-auto px-6 lg:px-10 py-6 space-y-5">
                 <Card data-testid="live-safety-switches-card">
                     <SectionTitle icon={ShieldWarning}>Live safety controls</SectionTitle>
@@ -50,7 +50,14 @@ export default function LiveMode() {
 
                 <Card>
                     <SectionTitle icon={CalendarCheck}>Automatic calling workflows (after approval)</SectionTitle>
-                    <div className="grid sm:grid-cols-2 gap-4">
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                        <div className="border border-[#e5e3d8] rounded-xl p-3" data-testid="live-workflow-booking">
+                            <p className="text-sm font-bold text-indigo-800 mb-2">Booking Confirmation</p>
+                            <Rule icon={CalendarCheck} title="Default timing" text="Within 3 hours of booking · configurable 1–24 h" />
+                            <Rule icon={ArrowClockwise} title="Retry" text="One retry +30 min if no-answer/busy · configurable 15–240 min" />
+                            <Rule icon={MapPin} title="Calling window" text="10:00–19:00 IST · ≥ 6 h gap before any Pre-Interview Confirmation on the same booking" />
+                            <p className="text-[11px] text-[#9b9787] mt-2">Toggle currently <b data-testid="live-workflow-booking-state">OFF</b> — admin controls it from <b>Settings → Call Scheduling</b>.</p>
+                        </div>
                         <div className="border border-[#e5e3d8] rounded-xl p-3" data-testid="live-workflow-confirm">
                             <p className="text-sm font-bold text-teal-800 mb-2">Pre-Interview Confirmation</p>
                             <Rule icon={CalendarCheck} title="Default timing" text="1 day before interview · configurable 1–7 days" />

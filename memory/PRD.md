@@ -29,6 +29,10 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - `BatchPanel.jsx` — batch rows now show "scenario: …" (`data-testid=batch-row-<id>-purpose`).
 - `/app/memory/test_credentials.md` corrected (password is `QAZwsx##123`, not `Admin User`).
 
+### 2026-02-14 — Live Mode UI parity fix
+- `frontend/src/pages/ai-calling/LiveMode.js` — "Automatic calling workflows" grid now renders all **three** cards: Booking Confirmation (OFF, default 3 h, retry +30 min, 10:00–19:00 IST window, ≥ 6 h gap before any Pre-Interview Confirmation), Pre-Interview Confirmation, and Missed-Interview Follow-up (OTP-based). Subtitle updated to "Three automatic calling workflows — dispatch remains blocked". Booking Confirmation toggle state surfaced via `data-testid=live-workflow-booking-state` (OFF).
+- Verified via screenshot on `/ai-calling/live`: all 3 cards visible, Booking OFF, Emergency Stop ON, Live Calling Stop ON — no safety gate released, no settings mutated.
+
 ### 2026-02-14 — iter66 sweep
 - `testing_agent_v3_fork` executed (`/app/test_reports/iteration_66.json`) — retest_needed=false, 4 MEDIUM polish items (all addressed above).
 - Pytest suite stabilised at 39/39 passing with `PYTHONPATH=/app/backend`.
