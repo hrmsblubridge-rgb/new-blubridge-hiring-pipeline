@@ -1,0 +1,44 @@
+{
+  "summary": "Tested the Enhancement 1 iter65 fixes on DB=hiring_ai_testing. Backend: 101/101 tests passed across the main agent's suites (test_enhancement1_availability, test_enhancement1_iter65_fixes, test_e1_availability_iter64 and 4 safety suites). My new independent suite passed 8/10: OTP is no longer returned by POST /api/pub/schedule; the employee verify-otp works (401/403 without auth, 200 with auth, attendance marked); repeat submissions with the same nonce (8 at once for availability, 4 at once for withdraw and reactivate) produced exactly one history row and one state change; 6 simultaneous publishes got distinct, increasing versions, and three runs passed; the worker filter source checks pass. FAILED: (1) the FRONTEND DOES NOT SEND submission_nonce on any request. AvailabilityGate.jsx is unchanged in commit dc51500, and the network capture shows bodies like {\"availability\":true}, {\"confirmed\":true} and {\"choice\":\"yes\"}. A retry after a network error sends a request with no nonce, so the server makes a new one. (2) /app/memory/test_credentials.md does not mention TEST_ADMIN_PASSWORD. It now lists the admin password as the username, and that value returns 401 at login. (3) Reusing a nonce across request types changes the registration and only then returns 409. (4) The concurrent publish test left 'Concurrent publish test N — xxxx' as the LIVE main question that candidates see. Frontend: double-clicking Submit sent one POST (the submitting/disabled guard works). NO, reason dropdown, Other text limited to 50 characters with a counter, withdraw checkbox and confirm, reactivation YES, YES unlocking the slot picker, and the admin Edit/Preview/Versions/Audit tabs with UI publish (v37 to v38) all work.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/pub/availability/{token}/withdraw (and /availability, /reactivate)", "issue": "Reusing a nonce across request types changes state before the nonce check. The early idempotency check only matches the SAME response_type. If the nonce belongs to a different type (e.g. an availability nonce reused on /withdraw), the handler sets withdrawn_by_candidate=True and then _append_response raises 409. Result: the registration is withdrawn, there is no withdrawal history row, and the client gets 409. Reproduced by test_iter65_independent_review.py::test_cross_type_nonce_reuse_does_not_mutate_state. Fix: if prior exists and its response_type differs from this request, return 409 BEFORE any update_one."},
+      {"endpoint": "POST /api/bb/availability-question/publish", "issue": "Theoretical race, not reproduced in 3 runs of 6 simultaneous publishes. update_one({_id:'current', version<$next}, upsert=True) raises a DuplicateKey error (500) when a higher version has already been written to 'current', because the upsert tries to insert _id 'current'. Use upsert=False when the doc already exists, or catch DuplicateKeyError. The version-conflict fallback also retries only once, and the seed-up $set can hand the same value to several callers."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "AvailabilityGate submit / withdraw / reactivate", "issue": "submission_nonce is NOT implemented on the frontend, although the review request says it was. AvailabilityGate.jsx has no nonce code (grep finds no 'nonce' in frontend/src) and was not changed in commit dc51500. Captured POST bodies: {\"availability\":true}, {\"availability\":false,\"reason_id\":\"other\",\"other_text\":\"...\"}, {\"confirmed\":true}, {\"choice\":\"yes\"}. In the network-error retry test (first request aborted, second sent), the retry also had no nonce, so the server generates a new uuid each time and backend replay protection never applies to real users. Double-click is only protected by the disabled={submitting} guard, which worked: one POST.", "affected_selectors": ["[data-testid='avail-continue']", "[data-testid='reason-submit']", "[data-testid='withdraw-confirm-btn']", "[data-testid='react-submit']"]}
+    ],
+    "design_issues": [
+      {"screen": "/schedule-interview/:token slot picker (existing)", "issues": ["The date field uses the browser's native mm/dd/yyyy date picker, not a shadcn Calendar, and does not match the DD-MM-YYYY format used elsewhere."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter65_independent_review.py", "/app/backend/tests/_ui_seed_iter65.py", "/app/test_reports/pytest/iter65_suites.xml", "/app/test_reports/pytest/iter65_independent.xml"],
+  "action_items": [
+    "HIGH: Add submission_nonce to AvailabilityGate.jsx: one nonce per intent (availability/withdraw/reactivate), reused on retry after a network error or 5xx, rotated after a 2xx, and sent in all 3 POST bodies.",
+    "HIGH: Fix /app/memory/test_credentials.md. It currently says the Password is the username string (login returns 401) and never mentions TEST_ADMIN_PASSWORD. Replace it with: 'Password: value of TEST_ADMIN_PASSWORD in /app/backend/.env'.",
+    "HIGH (security): The real admin password is in git history (commit 1087b7c's message and earlier diffs). Removing it from the .md file does not fix that. Rotate the password before production.",
+    "MEDIUM: Restore the live availability config in hiring_ai_testing. The published main_question (v38) is 'Concurrent publish test 0 — 521ee7', left by test_enhancement1_iter65_fixes.py::test concurrent publish (L198). Republish DEFAULT_CONFIG and make the test restore the original config in teardown.",
+    "MEDIUM: In submit/withdraw/reactivate, reject a nonce that belongs to a different response_type with 409 BEFORE changing bb_registrations.",
+    "LOW: Make the publish 'current' update safe against DuplicateKey (no upsert when the doc exists, or catch the error)."
+  ],
+  "critical_code_review_comments": [
+    "bb_availability.py _append_response runs the nonce/payload-conflict check AFTER the registration update in all three handlers. Any 409 there leaves the state changed. Move all validation before the writes.",
+    "submit_availability with 8 simultaneous same-nonce requests: every request updates bb_registrations, but they write the same values. The history row count is correct (1).",
+    "The withdraw replay does not check that the payload matches (confirmed flag). This is acceptable because there is only one possible payload.",
+    "The mdb fixture in test_enhancement1_iter65_fixes.py defaults DB_NAME to 'hiring_ai_testing' and MONGO_URL to localhost. Better to fail fast if DB_NAME is not set.",
+    "bb_availability.py is 857 lines. Consider splitting the admin routes into their own module.",
+    "Worker source check passed: bg_workers.py L448/L551 filter withdrawn_by_candidate != True, with no filter on chennai_availability_latest."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter65_independent_review.py (new)", "/app/backend/tests/_ui_seed_iter65.py (new UI seed/cleanup helper)"],
+  "success_rate": {"backend": "109/111 tests (98%); 2 failures = cross-type nonce bug + credentials-doc contract", "frontend": "~85%: all happy paths pass; nonce integration missing"},
+  "test_credentials": "Login works with Admin User + TEST_ADMIN_PASSWORD from backend/.env. test_credentials.md is wrong: its password value gives 401, and it does not reference the env var. No values printed.",
+  "seed_data_creation": "Temporary bb_registrations with schedule_token 'iter65-<hex>' / 'iter65-ui-<hex>' and their history rows were deleted by token after the run. The publish tests added versions (now v38) with the same config, and the UI test published once (v37 to v38).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: cd /app/backend && export REACT_APP_BACKEND_URL=... && pytest tests/test_iter65_independent_review.py -p no:xdist. The UI helper is python tests/_ui_seed_iter65.py seed|count|cleanup. To check the frontend nonce fix, capture POST bodies to /api/pub/availability/* and confirm the same nonce is sent on retry after route.abort(). Safety settings were unchanged: ENABLE_WHATSAPP/EMAIL false, AI_CALLING_ENABLED false, and the safety suites pass.",
+  "rca of the issue": "Frontend nonce: the iter65 commit dc51500 only touched backend files (bb_availability.py, bb_modules.py, tests), so the AvailabilityGate.jsx change was never applied. Cross-type nonce: the early replay check filters on response_type, so a nonce of a different type skips it, the state is written, and _append_response's differ_keys check then raises 409."
+}

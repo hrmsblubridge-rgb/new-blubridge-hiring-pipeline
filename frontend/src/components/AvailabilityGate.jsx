@@ -53,6 +53,13 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
     const [reactChoice, setReactChoice] = useState('');  // "yes" | "no" | "other"
     const [reactOther, setReactOther] = useState('');
     const [submitting, setSubmitting] = useState(false);
+    // iter65 — Idempotency: one nonce per intended ACTION. We generate a new
+    // nonce whenever a fresh action starts (first POST attempt). Retries of
+    // the SAME action after a network error reuse the same nonce.
+    const newNonce = () => (crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const [availNonce, setAvailNonce] = useState(newNonce());
+    const [withdrawNonce, setWithdrawNonce] = useState(newNonce());
+    const [reactNonce, setReactNonce] = useState(newNonce());
     const [thanks, setThanks] = useState('');
 
     const load = () => {
@@ -90,9 +97,10 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
 
     // ----- actions -----
     const submitAvailability = async (availability) => {
+        if (submitting) return;  // guard against double-click
         setSubmitting(true);
         try {
-            const body = { availability };
+            const body = { availability, submission_nonce: availNonce };
             if (availability === false) {
                 if (!reasonId) { alert('Please select a reason.'); setSubmitting(false); return; }
                 body.reason_id = reasonId;
@@ -100,19 +108,23 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
             }
             const r = await axios.post(`${API}/api/pub/availability/${token}`, body);
             setCandidate(r.data.candidate);
-            // After NO, leave the UI showing the withdrawal ask; after YES
-            // the effect above hands off to the parent booking page.
+            // Rotate the nonce only after the server confirms — a new intent
+            // (different YES/NO or a new reason) becomes a new submission.
+            setAvailNonce(newNonce());
         } catch (e) {
             alert(e.response?.data?.detail || 'Could not save your response.');
         } finally { setSubmitting(false); }
     };
 
     const submitWithdraw = async () => {
+        if (submitting) return;
         setSubmitting(true);
         try {
-            const r = await axios.post(`${API}/api/pub/availability/${token}/withdraw`, { confirmed: true });
+            const r = await axios.post(`${API}/api/pub/availability/${token}/withdraw`,
+                                       { confirmed: true, submission_nonce: withdrawNonce });
             setCandidate(r.data.candidate);
             setThanks(config.withdraw_thankyou);
+            setWithdrawNonce(newNonce());
         } catch (e) {
             alert(e.response?.data?.detail || 'Could not withdraw.');
         } finally { setSubmitting(false); }
@@ -120,12 +132,14 @@ export default function AvailabilityGate({ token, onAllowBooking, bookedDetails 
 
     const submitReactivation = async () => {
         if (!reactChoice) { alert('Please select an option.'); return; }
+        if (submitting) return;
         setSubmitting(true);
         try {
-            const body = { choice: reactChoice };
+            const body = { choice: reactChoice, submission_nonce: reactNonce };
             if (reactChoice === 'other') body.other_text = reactOther.trim();
             const r = await axios.post(`${API}/api/pub/availability/${token}/reactivate`, body);
             setCandidate(r.data.candidate);
+            setReactNonce(newNonce());
             if (reactChoice === 'no') setThanks(config.reactivation_no_confirmation);
             else if (reactChoice === 'other') setThanks(config.reactivation_other_confirmation);
             else {

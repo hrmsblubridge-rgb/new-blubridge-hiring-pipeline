@@ -366,7 +366,12 @@ async def submit_availability(token: str, body: AvailabilityBody):
 
     # Idempotency: if we've already saved this nonce, validate payload and replay.
     prior = await _already_submitted(body.submission_nonce)
-    if prior and prior.get("response_type") == "availability":
+    if prior:
+        if prior.get("response_type") != "availability":
+            raise HTTPException(
+                status_code=409,
+                detail="This submission nonce was already used for a different operation.",
+            )
         # Payload consistency check: nonce reuse with different payload → 409.
         if (prior.get("availability") != bool(body.availability)
                 or prior.get("reason_id") != (body.reason_id or None)
@@ -469,13 +474,19 @@ async def submit_withdraw(token: str, body: WithdrawBody):
         raise HTTPException(status_code=410, detail="Application superseded.")
 
     cfg = await _get_current_config()
-    # Idempotency — same nonce replay returns the stored state.
+    # Idempotency — must come BEFORE the state check so a replay of the exact
+    # successful withdrawal always returns 200 regardless of current state.
     prior = await _already_submitted(body.submission_nonce)
-    if prior and prior.get("response_type") == "withdrawal":
+    if prior:
+        if prior.get("response_type") != "withdrawal":
+            raise HTTPException(
+                status_code=409,
+                detail="This submission nonce was already used for a different operation.",
+            )
         return {"ok": True, "idempotent": True, "candidate": _registration_summary(reg, cfg)}
 
     if reg.get("withdrawn_by_candidate"):
-        # Already withdrawn by a prior request — idempotent 200.
+        # Already withdrawn by a prior request (no nonce / different nonce) — idempotent 200.
         return {"ok": True, "idempotent": True, "candidate": _registration_summary(reg, cfg)}
 
     if not body.confirmed:
@@ -568,7 +579,12 @@ async def submit_reactivate(token: str, body: ReactivateBody):
     # otherwise a replay of a successful YES reactivation would 409 because
     # the candidate is already reactivated.
     prior = await _already_submitted(body.submission_nonce)
-    if prior and prior.get("response_type") == "reactivation":
+    if prior:
+        if prior.get("response_type") != "reactivation":
+            raise HTTPException(
+                status_code=409,
+                detail="This submission nonce was already used for a different operation.",
+            )
         if prior.get("reactivation_choice") != body.choice:
             raise HTTPException(
                 status_code=409,
@@ -809,11 +825,17 @@ async def admin_publish(request: Request, body: DraftBody):
         new_doc["version"] = next_version
         await _db.bb_availability_question_versions.insert_one({**new_doc, "snapshot_at": now})
     # Now atomically update current only if the new version is strictly greater.
-    await _db.bb_availability_question_config.update_one(
-        {"_id": "current", "$or": [{"version": {"$lt": next_version}}, {"version": {"$exists": False}}]},
-        {"$set": new_doc},
-        upsert=True,
-    )
+    # Catch DuplicateKey on upsert if a concurrent writer inserted first.
+    try:
+        await _db.bb_availability_question_config.update_one(
+            {"_id": "current", "$or": [{"version": {"$lt": next_version}}, {"version": {"$exists": False}}]},
+            {"$set": new_doc},
+            upsert=True,
+        )
+    except Exception:
+        # Current doc already written at a higher version — our version row
+        # is still safely stored in bb_availability_question_versions.
+        pass
     await _db.bb_availability_question_audit.insert_one({
         "action": "publish",
         "from_version": cur.get("version"),
