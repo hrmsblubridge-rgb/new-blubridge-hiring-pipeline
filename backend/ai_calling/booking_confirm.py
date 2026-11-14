@@ -131,7 +131,21 @@ async def should_skip_min_6h_gap(reg_id: str, booking_key: str, due_at: datetime
         sort=[("verified_at", -1)],
     )
     if not last:
-        return False
+        # Also check the mirrored result on bb_registrations (Session 2).
+        from bson import ObjectId as _OID
+        try:
+            oid = _OID(reg_id) if _OID.is_valid(reg_id) else None
+        except Exception:
+            oid = None
+        if oid is None:
+            return False
+        reg = await db().bb_registrations.find_one(
+            {"_id": oid},
+            {"ai_call_results.booking_confirmation.latest": 1},
+        )
+        last = (((reg or {}).get("ai_call_results") or {}).get("booking_confirmation") or {}).get("latest") or None
+        if not last or last.get("booking_key") != booking_key:
+            return False
     try:
         last_t = datetime.fromisoformat(last["verified_at"])
     except (TypeError, ValueError):

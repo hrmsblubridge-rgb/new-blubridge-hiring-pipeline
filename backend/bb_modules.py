@@ -1,9 +1,10 @@
 """BluBridge Modules — New features for the Hiring Pipeline.
 Separate router to avoid modifying existing server.py logic."""
 
-from fastapi import APIRouter, HTTPException, Request, Query
-from pydantic import BaseModel, field_validator
 import re as _re
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, field_validator
 
 
 def _validate_phone_10digits(v):
@@ -46,10 +47,11 @@ def _validate_nonempty(v, field_name="field"):
     if not s:
         raise ValueError(f"{field_name} is required")
     return s
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
-from datetime import datetime, timezone, timedelta
+
 from bson import ObjectId
-import hashlib, secrets, re, logging, uuid, asyncio
+import asyncio, hashlib, logging, re, secrets, uuid
 from _fmt import to_24h_db
 
 bb_router = APIRouter(prefix="/api/bb")
@@ -2705,9 +2707,75 @@ EXPORT_FIELD_CATALOG = [
     ("attendance",          "Attendance",          "interview",    ["otp_verified"],                               lambda d: "Attended" if (d.get("otp_verified") not in (None, "", False)) else "Not Attended"),
     ("college_type",        "College Type",        "interview",    ["_college_status", "_nirf_category"],          lambda d: d.get("_college_status") or d.get("_nirf_category") or ""),
     ("result_status",       "Result Status",       "interview",    ["result_status"],                              lambda d: d.get("result_status") or ""),
+    # ===== AI Calling — latest verified outcome per purpose (Enhancement 2 §15A/§17/§18/§20A) =====
+    # Each entry projects `_ai_booking/_ai_confirm/_ai_missed` enriched onto the row before export.
+    ("ai_booking_outcome",  "AI Booking Call - Outcome",       "ai_calling", ["_ai_booking"], lambda d: ((d.get("_ai_booking") or {}).get("outcome") or "")),
+    ("ai_booking_verified_at", "AI Booking Call - Verified At", "ai_calling", ["_ai_booking"], lambda d: _format_iso_dt((d.get("_ai_booking") or {}).get("verified_at") or "")),
+    ("ai_booking_hr_flag",  "AI Booking Call - HR Review Flag","ai_calling", ["_ai_booking"], lambda d: "Yes" if (d.get("_ai_booking") or {}).get("needs_hr_review") else ""),
+    ("ai_booking_reason",   "AI Booking Call - Concise Reason","ai_calling", ["_ai_booking"], lambda d: ((d.get("_ai_booking") or {}).get("concise_reason") or "")),
+    ("ai_confirm_outcome",  "AI Interview Confirmation - Outcome", "ai_calling", ["_ai_confirm"], lambda d: ((d.get("_ai_confirm") or {}).get("outcome") or "")),
+    ("ai_confirm_verified_at", "AI Interview Confirmation - Verified At", "ai_calling", ["_ai_confirm"], lambda d: _format_iso_dt((d.get("_ai_confirm") or {}).get("verified_at") or "")),
+    ("ai_confirm_hr_flag",  "AI Interview Confirmation - HR Review Flag", "ai_calling", ["_ai_confirm"], lambda d: "Yes" if (d.get("_ai_confirm") or {}).get("needs_hr_review") else ""),
+    ("ai_confirm_reason",   "AI Interview Confirmation - Concise Reason", "ai_calling", ["_ai_confirm"], lambda d: ((d.get("_ai_confirm") or {}).get("concise_reason") or "")),
+    ("ai_missed_outcome",   "AI Missed Follow-up - Outcome",   "ai_calling", ["_ai_missed"], lambda d: ((d.get("_ai_missed") or {}).get("outcome") or "")),
+    ("ai_missed_verified_at","AI Missed Follow-up - Verified At","ai_calling", ["_ai_missed"], lambda d: _format_iso_dt((d.get("_ai_missed") or {}).get("verified_at") or "")),
+    ("ai_missed_hr_flag",   "AI Missed Follow-up - HR Review Flag","ai_calling", ["_ai_missed"], lambda d: "Yes" if (d.get("_ai_missed") or {}).get("needs_hr_review") else ""),
+    ("ai_missed_reason",    "AI Missed Follow-up - Concise Reason","ai_calling", ["_ai_missed"], lambda d: ((d.get("_ai_missed") or {}).get("concise_reason") or "")),
+    ("ai_reschedule_link_state", "AI Reschedule Link - State", "ai_calling", ["_ai_reschedule"], lambda d: ((d.get("_ai_reschedule") or {}).get("state") or "")),
+    ("ai_reschedule_link_source","AI Reschedule Link - Source Purpose","ai_calling", ["_ai_reschedule"], lambda d: ((d.get("_ai_reschedule") or {}).get("source") or "")),
+    ("ai_reschedule_link_at","AI Reschedule Link - Delivered At","ai_calling", ["_ai_reschedule"], lambda d: _format_iso_dt((d.get("_ai_reschedule") or {}).get("at") or "")),
 ]
 
 EXPORT_FIELD_BY_KEY = {e[0]: e for e in EXPORT_FIELD_CATALOG}
+
+
+def _format_iso_dt(s) -> str:
+    """ISO-8601 → 'YYYY-MM-DD HH:MM' IST-ish rendering for Excel/CSV."""
+    if not s:
+        return ""
+    try:
+        from datetime import datetime as _dt
+        return _dt.fromisoformat(str(s).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(s)[:19].replace("T", " ")
+
+
+async def _enrich_rows_with_ai_calls(docs: list) -> None:
+    """Enhancement 2 Session 2 — attach bb_registrations.ai_call_results and
+    the reschedule-link delivery state onto each export/report row (mutates
+    in place). Groups by email to make a single DB round-trip."""
+    emails = list({(d.get("email") or "").strip().lower() for d in docs if d.get("email")})
+    if not emails:
+        return
+    projection = {
+        "email": 1, "schedule_date": 1,
+        "ai_call_results": 1,
+        "reschedule_link_last_state": 1,
+        "reschedule_link_last_source": 1,
+        "reschedule_link_last_at": 1,
+    }
+    cursor = _db.bb_registrations.find({"email": {"$in": emails}}, projection)
+    by_email: dict = {}
+    async for r in cursor:
+        em = (r.get("email") or "").strip().lower()
+        prior = by_email.get(em)
+        if prior and str(prior.get("schedule_date") or "") > str(r.get("schedule_date") or ""):
+            continue
+        by_email[em] = r
+    for d in docs:
+        em = (d.get("email") or "").strip().lower()
+        reg = by_email.get(em) or {}
+        acr = (reg.get("ai_call_results") or {})
+        def _lat(p):
+            return (acr.get(p) or {}).get("latest") or {}
+        d["_ai_booking"] = _lat("booking_confirmation")
+        d["_ai_confirm"] = _lat("interview_confirmation")
+        d["_ai_missed"] = _lat("missed_interview_followup")
+        d["_ai_reschedule"] = {
+            "state": reg.get("reschedule_link_last_state"),
+            "source": reg.get("reschedule_link_last_source"),
+            "at": reg.get("reschedule_link_last_at"),
+        } if reg.get("reschedule_link_last_state") else {}
 
 
 def _export_projection_for(field_keys):
@@ -2760,8 +2828,20 @@ async def get_interview_reports_export_fields(
     sections_map = {
         "registration": {"id": "registration", "label": "Registration Fields", "fields": []},
         "interview": {"id": "interview", "label": "Interview Fields", "fields": []},
+        "ai_calling": {"id": "ai_calling", "label": "AI Calling Fields", "fields": []},
     }
+    # AI Calling columns rely on bb_registrations.ai_call_results (not on
+    # pipeline_data keys), so sample-based key intersection would hide them
+    # on datasets that haven't received a verified call yet. Surface them
+    # unconditionally so admins can request them even on empty call history.
+    _ai_section_keys = set()
     for key, label, section, db_keys, _extractor in EXPORT_FIELD_CATALOG:
+        if section == "ai_calling":
+            sections_map["ai_calling"]["fields"].append({"key": key, "label": label})
+            _ai_section_keys.add(key)
+    for key, label, section, db_keys, _extractor in EXPORT_FIELD_CATALOG:
+        if key in _ai_section_keys:
+            continue
         # Always include the field if catalog says so AND at least one underlying
         # DB key is present in the sample. If the dataset is empty we still show
         # the catalog so the modal doesn't appear broken — backend later returns 404.
@@ -2770,7 +2850,7 @@ async def get_interview_reports_export_fields(
         sections_map[section]["fields"].append({"key": key, "label": label})
 
     return {
-        "sections": [sections_map["registration"], sections_map["interview"]],
+        "sections": [sections_map["registration"], sections_map["interview"], sections_map["ai_calling"]],
         "total_matching": cnt,
     }
 
@@ -2832,6 +2912,11 @@ async def export_interview_reports(
             return None
         return {label: extract(d) for label, extract in extractors}
 
+    # Enhancement 2 Session 2 — if any ai_* column is requested, materialise
+    # docs upfront so the per-row enrichment can run with a single DB round
+    # trip. Non-AI exports stay fully streamed.
+    _wants_ai = any(k.startswith("ai_") for k in selected)
+
     if format == "csv":
         # True streaming CSV with gzip compression — keeps the K8s 60 s ingress
         # alive on large datasets (~10x reduction in wire bytes).
@@ -2842,7 +2927,15 @@ async def export_interview_reports(
             buf = io.StringIO()
             writer = _csv.DictWriter(buf, fieldnames=headers)
             seen = set()
-            cursor = src.aggregate(pipeline, allowDiskUse=True, batchSize=2000)
+            if _wants_ai:
+                docs_all = await src.aggregate(pipeline, allowDiskUse=True).to_list(None)
+                await _enrich_rows_with_ai_calls(docs_all)
+                async def _iter():
+                    for d in docs_all:
+                        yield d
+                cursor = _iter()
+            else:
+                cursor = src.aggregate(pipeline, allowDiskUse=True, batchSize=2000)
             async for d in cursor:
                 row = _row(d)
                 if not row:
@@ -2883,6 +2976,11 @@ async def export_interview_reports(
     # XLSX: build in-memory (openpyxl write_only) — keeps memory low while still
     # buffering the final ZIP to a single response (XLSX cannot be sent in chunks).
     docs = await src.aggregate(pipeline, allowDiskUse=True).to_list(None)
+    # Enhancement 2 Session 2 — attach the latest verified AI-call outcome
+    # per purpose and the reschedule-link delivery state to each row so the
+    # dedicated ai_calling columns can render.
+    if any(k.startswith("ai_") for k in selected):
+        await _enrich_rows_with_ai_calls(docs)
     seen = set(); rows = []
     for d in docs:
         row = _row(d)
@@ -2990,6 +3088,11 @@ async def get_interview_reports(
     ]
     docs = await src.aggregate(pipeline, allowDiskUse=False).to_list(None)
 
+    # Enhancement 2 Session 2 — enrich each visible row with the latest
+    # verified AI-call outcome per purpose so the admin table can flag
+    # HR-review candidates without a second API call.
+    await _enrich_rows_with_ai_calls(docs)
+
     rows = []
     for d in docs:
         # iter110 — Emit the full bucketed college status string instead of
@@ -3010,6 +3113,18 @@ async def get_interview_reports(
             "job_role": canonical_role or "-",
             "college_type": college_status,
             "attendance": "Attended" if otp else "Not Attended",
+            # Enhancement 2 Session 2 — compact AI-call summary for the row.
+            "ai_calls": {
+                "booking_confirmation": d.get("_ai_booking") or {},
+                "interview_confirmation": d.get("_ai_confirm") or {},
+                "missed_interview_followup": d.get("_ai_missed") or {},
+                "reschedule_link": d.get("_ai_reschedule") or {},
+            },
+            "ai_needs_hr_review": bool(
+                (d.get("_ai_booking") or {}).get("needs_hr_review")
+                or (d.get("_ai_confirm") or {}).get("needs_hr_review")
+                or (d.get("_ai_missed") or {}).get("needs_hr_review")
+            ),
         })
 
     # Summary (aggregated over the filtered set — ALL rows, not just this page)
@@ -3760,6 +3875,33 @@ async def candidate_journey(
          "superseded": {"$ne": True}},
         sort=[("registered_at", -1)],
     )
+    # Enhancement 2 Session 2 — surface the latest verified AI-call outcome
+    # per purpose on the Candidate Journey drawer. Read-only; mirrors the
+    # append-only ai_call_results.<purpose>.latest snapshot.
+    ai_calls_block = None
+    if reg_doc:
+        acr = (reg_doc.get("ai_call_results") or {})
+        def _lat(p):
+            return (acr.get(p) or {}).get("latest") or None
+        booking_latest = _lat("booking_confirmation")
+        confirm_latest = _lat("interview_confirmation")
+        missed_latest = _lat("missed_interview_followup")
+        if booking_latest or confirm_latest or missed_latest or reg_doc.get("reschedule_link_last_state"):
+            ai_calls_block = {
+                "booking_confirmation": booking_latest,
+                "interview_confirmation": confirm_latest,
+                "missed_interview_followup": missed_latest,
+                "reschedule_link": ({
+                    "state": reg_doc.get("reschedule_link_last_state"),
+                    "source": reg_doc.get("reschedule_link_last_source"),
+                    "at": reg_doc.get("reschedule_link_last_at"),
+                } if reg_doc.get("reschedule_link_last_state") else None),
+                "needs_hr_review": bool(
+                    (booking_latest or {}).get("needs_hr_review")
+                    or (confirm_latest or {}).get("needs_hr_review")
+                    or (missed_latest or {}).get("needs_hr_review")
+                ),
+            }
     avail_block = None
     if reg_doc:
         avail_history = []
@@ -3809,6 +3951,7 @@ async def candidate_journey(
             "date_of_induction": date_of_induction,
         },
         "availability_block": avail_block,
+        "ai_calls_block": ai_calls_block,
     }
 
 
@@ -5590,7 +5733,6 @@ async def register_applicant(data: RegistrationBody):
 
     schedule_link = None
     if is_shortlisted and schedule_token:
-        import os as _os
         from messaging import build_public_url as _build_public_url
         schedule_link = _build_public_url(f"/schedule-interview/{schedule_token}")
 

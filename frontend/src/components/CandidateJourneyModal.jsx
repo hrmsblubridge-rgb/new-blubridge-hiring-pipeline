@@ -195,6 +195,35 @@ export default function CandidateJourneyModal({ candidate, onClose }) {
                         <ProfileCallHistory email={data.basic.email} />
                         <ProfileConsentPanel email={data.basic.email} />
 
+                        {/* Enhancement 2 Session 2 — Latest verified AI-call results per purpose */}
+                        {data.ai_calls_block && (
+                            <section data-testid="journey-ai-calls">
+                                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3 flex items-center gap-2">
+                                    AI Call Results
+                                    {data.ai_calls_block.needs_hr_review && (
+                                        <span data-testid="journey-ai-needs-review" className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-900/40 text-amber-300 border-amber-800/50">
+                                            Needs HR Review
+                                        </span>
+                                    )}
+                                </h3>
+                                <div className="border border-zinc-800 bg-zinc-900/50 divide-y divide-zinc-800">
+                                    <AiCallRow label="Booking Confirmation" testid="ai-booking" latest={data.ai_calls_block.booking_confirmation} />
+                                    <AiCallRow label="Pre-Interview Confirmation" testid="ai-confirm" latest={data.ai_calls_block.interview_confirmation} />
+                                    <AiCallRow label="Missed-Interview Follow-up" testid="ai-missed" latest={data.ai_calls_block.missed_interview_followup} />
+                                    {data.ai_calls_block.reschedule_link && (
+                                        <div className="px-4 py-3 flex items-center justify-between text-sm" data-testid="ai-reschedule-link">
+                                            <span className="text-zinc-400">Reschedule Link</span>
+                                            <span className="text-zinc-300">
+                                                <code className="text-xs text-cyan-400">{data.ai_calls_block.reschedule_link.state}</code>
+                                                {data.ai_calls_block.reschedule_link.source && <> · from <code className="text-xs text-zinc-400">{data.ai_calls_block.reschedule_link.source}</code></>}
+                                                {data.ai_calls_block.reschedule_link.at && <span className="text-zinc-500 ml-2">{String(data.ai_calls_block.reschedule_link.at).slice(0, 10)}</span>}
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+                            </section>
+                        )}
+
                         {/* Enhancement 1 — Chennai availability snapshot */}
                         {data.availability_block && (
                             <section data-testid="journey-availability">
@@ -287,6 +316,39 @@ function Detail({ icon: Icon, label, value }) {
             <div className="min-w-0 flex-1">
                 <div className="text-xs text-zinc-500 uppercase tracking-wider">{label}</div>
                 <div className="text-sm text-zinc-200 break-words">{value || '—'}</div>
+            </div>
+        </div>
+    );
+}
+
+function AiCallRow({ label, testid, latest }) {
+    const l = latest || null;
+    return (
+        <div className="px-4 py-3 flex items-start justify-between gap-4 text-sm" data-testid={`${testid}-row`}>
+            <div>
+                <div className="text-zinc-300 font-medium">{label}</div>
+                {l?.verified_at && (
+                    <div className="text-xs text-zinc-500 mt-0.5" data-testid={`${testid}-verified-at`}>
+                        Verified {String(l.verified_at).slice(0, 10)}
+                    </div>
+                )}
+                {l?.attendance_at_call && (
+                    <div className="text-[11px] text-zinc-500 mt-0.5">Attendance at call: {l.attendance_at_call}</div>
+                )}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+                {l?.outcome ? (
+                    <span data-testid={`${testid}-outcome`} className="text-xs text-cyan-300 font-medium">
+                        {l.concise_reason || l.outcome}
+                    </span>
+                ) : (
+                    <span data-testid={`${testid}-empty`} className="text-xs text-zinc-500 italic">No verified call yet</span>
+                )}
+                {l?.needs_hr_review && (
+                    <span data-testid={`${testid}-hr-flag`} className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-900/40 text-amber-300 border-amber-800/50">
+                        HR Review
+                    </span>
+                )}
             </div>
         </div>
     );

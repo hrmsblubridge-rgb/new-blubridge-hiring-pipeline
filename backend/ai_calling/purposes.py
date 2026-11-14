@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 
 from .booking_confirm import BOOKING, plan_booking_confirmation, should_skip_min_6h_gap  # noqa: F401
 from .dryrun import IST, MIN_LEAD, STATUS_REASON, TRUTHY_OTP, _ceil5, booking_key, interview_at, into_window, plan_booking
+import os
 from .provider import _auth, _csrf
 from .store import SETTINGS_ID, db, get_settings, normalize_phone, now_iso
 
@@ -19,7 +20,9 @@ RETRY_OUTCOMES = ("no_answer", "busy")  # provider-confirmed, no conversation
 MISSED_BLOCKING_ALERTS = ("RESCHEDULE_REQUEST_PENDING", "RUNNING_LATE", "CLAIMS_ATTENDED")
 SCHEDULING_KEYS = {"confirm_enabled": bool, "confirm_offset_days": int, "missed_enabled": bool, "missed_offset_minutes": int,
                    "live_daily_call_limit": int, "live_pilot_daily_cap": int, "live_max_concurrent_calls": int,
-                   "live_queue_capacity": int}
+                   "live_queue_capacity": int,
+                   # Enhancement 2 Session 2 — booking_confirmation admin fields.
+                   "booking_enabled": bool, "booking_target_hours": int, "booking_retry_minutes": int}
 
 
 def otp_state(b: dict) -> str:
@@ -164,7 +167,17 @@ async def cancel_missed(reg_id: str, bkey: str, reason: str) -> int:
 
 
 async def apply_outcome(job: dict, ex: dict) -> str:
-    """Records alerts/suppression for one finished call. Never edits the booking or otp_verified."""
+    """Records alerts/suppression for one finished call. Never edits the booking or otp_verified.
+
+    Enhancement 2 Session 2:
+      • Mirrors the verified result to bb_registrations.ai_call_results.<purpose>
+        (append-only history + latest snapshot, scoped to the exact
+        schedule_version this job was dispatched against).
+      • For a verified RESCHEDULE_REQUESTED outcome from ANY of the three AI
+        purposes, invokes deliver_reschedule_link() so the candidate
+        automatically receives the standard scheduling link. Enhancement-1
+        eligibility and idempotency are honoured by the delivery helper.
+    """
     rid, bkey, purpose = job["registration_id"], job["booking_key"], job.get("purpose", CONFIRM)
     out, real = outcome_of(purpose, ex), not rid.startswith("fixture:")
     if out == "DO_NOT_CALL" and real:
@@ -184,7 +197,106 @@ async def apply_outcome(job: dict, ex: dict) -> str:
     elif out == "CLAIMS_ATTENDED":
         await raise_alert(rid, bkey, purpose, "CLAIMS_ATTENDED", {"attendance_dispute": True})
         await cancel_missed(rid, bkey, "CLAIMS_ATTENDED")
+
+    # --- Enhancement 2 §15A/§20A — verified-outcome pipeline mirror ----
+    # Only run for real (non-fixture) registrations with a verified timestamp
+    # on the mock_call. The caller (mock_tick) stamps `verified_at` ONLY when
+    # the call completed (status == completed). No-answer / busy / timeout /
+    # failed never reach this branch, so the mirror is never written for
+    # unverified calls.
+    verified_at = (job.get("mock_call") or {}).get("verified_at") or ex.get("_verified_at")
+    if real and verified_at:
+        try:
+            await _mirror_latest_result(rid, bkey, purpose, out, ex, job, verified_at)
+        except Exception as _e:  # pragma: no cover
+            import logging
+            logging.getLogger("ai_calling.apply_outcome").warning(
+                f"mirror_latest_result failed: {_e}")
+
+        # Automatic rescheduling-link delivery — any of the three purposes.
+        if out == "RESCHEDULE_REQUESTED":
+            try:
+                from bb_reschedule_link import deliver_reschedule_link
+                sv = job.get("schedule_version") or 1
+                exec_id = ((job.get("mock_call") or {}).get("execution_id")
+                           or f"job:{str(job.get('_id') or '')}")
+                await deliver_reschedule_link(rid, sv, exec_id, purpose)
+            except Exception as _e:  # pragma: no cover
+                import logging
+                logging.getLogger("ai_calling.apply_outcome").warning(
+                    f"deliver_reschedule_link failed: {_e}")
     return out
+
+
+# ---- Enhancement 2 Session 2: separate verified result mirrors --------------
+# Concise mapped reasons for the missed-interview outcome. Short enough for
+# Excel/CSV exports; never raw transcript text.
+MISSED_REASON_MAP = {
+    "MISSED_CONFIRMED": "Missed — confirmed",
+    "RUNNING_LATE": "Running late",
+    "CLAIMS_ATTENDED": "Claims attended (dispute)",
+    "RESCHEDULE_REQUESTED": "Requested reschedule",
+    "DECLINED": "Declined",
+    "DO_NOT_CALL": "Do not call",
+    "WRONG_NUMBER": "Wrong number",
+    "UNKNOWN": "Unknown",
+}
+
+
+def _needs_hr_review(purpose: str, outcome: str) -> bool:
+    """Outcomes that require human follow-up regardless of auto-actions."""
+    if outcome in ("WRONG_NUMBER", "RUNNING_LATE", "CLAIMS_ATTENDED", "DO_NOT_CALL"):
+        return True
+    if purpose == MISSED and outcome in ("MISSED_CONFIRMED", "RESCHEDULE_REQUESTED", "DECLINED", "UNKNOWN"):
+        return True
+    return False
+
+
+async def _mirror_latest_result(reg_id: str, booking_key_val: str, purpose: str,
+                                outcome: str, extracted: dict, job: dict,
+                                verified_at: str) -> None:
+    """Write the verified AI-call result into bb_registrations.ai_call_results.<purpose>.
+
+    Preserves full history (append-only) and stamps the latest-verified
+    snapshot tagged with schedule_version + OTP attendance so Candidate
+    Journey, Interview Schedule table and Excel/CSV exports can render the
+    three purposes independently.
+    """
+    from bson import ObjectId as _OID
+    try:
+        oid = _OID(reg_id) if _OID.is_valid(reg_id) else None
+    except Exception:
+        oid = None
+    if oid is None:
+        return
+    reg = await db().bb_registrations.find_one({"_id": oid}, {"otp_verified": 1, "schedule_version": 1})
+    if reg is None:
+        return
+
+    snapshot = {
+        "outcome": outcome,
+        "verified_at": verified_at,
+        "purpose": purpose,
+        "booking_key": booking_key_val,
+        "schedule_version": job.get("schedule_version") or reg.get("schedule_version") or 1,
+        "attempt": int(job.get("attempt") or 1),
+        "execution_id": (job.get("mock_call") or {}).get("execution_id"),
+        "attendance_at_call": "verified" if reg.get("otp_verified") in TRUTHY_OTP else (
+            "not_verified" if reg.get("otp_verified") in ("", False) else "unknown"),
+        "concise_reason": MISSED_REASON_MAP.get(outcome, ""),
+        "preferred_reschedule_datetime": extracted.get("preferred_reschedule_datetime"),
+        "needs_hr_review": _needs_hr_review(purpose, outcome),
+    }
+    history_entry = {**snapshot, "recorded_at": now_iso()}
+    await db().bb_registrations.update_one(
+        {"_id": oid},
+        {
+            "$set": {f"ai_call_results.{purpose}.latest": snapshot,
+                     f"ai_call_results.{purpose}.updated_at": now_iso()},
+            "$push": {f"ai_call_results.{purpose}.history": {
+                "$each": [history_entry], "$slice": -50}},
+        },
+    )
 
 
 async def open_alerts(reg_ids: list) -> dict:
@@ -208,6 +320,7 @@ def blocked_for(alerts: dict, bkey: str, purpose: str) -> list:
 async def get_scheduling(request: Request):
     await _auth(request)
     s = await get_settings()
+    backup_agent_id = (os.environ.get("BOLNA_BACKUP_AGENT_ID") or "").strip()
     return {"interview_confirmation": {"enabled": s["confirm_enabled"], "offset_days": s["confirm_offset_days"], "offset_range": [1, 7],
                                        "max_retries": 1, "retry_minutes": s["confirm_retry_minutes"],
                                        "window": [s["confirm_window_start"], s["confirm_window_end"]]},
@@ -221,10 +334,15 @@ async def get_scheduling(request: Request):
                                      "target_range_hours": [1, 24],
                                      "max_retries": 1,
                                      "retry_minutes": int(s.get("booking_retry_minutes", 30)),
+                                     "retry_range_minutes": [15, 240],
                                      "window": [s.get("booking_window_start", "10:00"),
                                                 s.get("booking_window_end", "19:00")],
                                      "activated_at": s.get("booking_activated_at"),
                                      "note": "Independent ON/OFF. Dispatch still gated by Emergency Stop, Live Calling Stop and AI_CALLING_ENABLED."},
+            "bolna_backup_agent": {"configured": bool(backup_agent_id),
+                                    "agent_id_masked": (backup_agent_id[:4] + "…" + backup_agent_id[-4:]) if len(backup_agent_id) >= 8 else ("configured" if backup_agent_id else ""),
+                                    "live": False,
+                                    "note": "Backup agent is validated and disabled. Switching agents or dispatching through it is not permitted in this phase."},
             "capacity": {k: s[k] for k in ("live_daily_call_limit", "live_pilot_daily_cap", "live_max_concurrent_calls", "live_queue_capacity")}}
 
 

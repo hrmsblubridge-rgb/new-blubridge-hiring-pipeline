@@ -368,6 +368,10 @@ async def mock_tick(worker: str, now: datetime = None, outcome: str = "CONFIRMED
                    extracted=_mock_extraction(purpose, outcome), request_body_user_data=res["body"]["user_data"])
         status = {"no_answer": "no_answer", "busy": "busy", "timeout": "pending_reconciliation", "failed": "failed"}.get(outcome, "completed")
         rec["confirmed_attendance"] = purpose == CONFIRM and status == "completed" and outcome == "CONFIRMED"
+        # Enhancement 2 Session 2: stamp `verified_at` only for completed calls
+        # so apply_outcome can mirror the result to bb_registrations.
+        if status == "completed":
+            rec["verified_at"] = now_iso()
         await db().ai_live_mock_jobs.update_one({"_id": jid}, {"$set": {
             "status": status, "mock_call": rec, "last_gate": g, "provider_request_sent": False, "finished_at": now_iso(), "lease_until": None}})
     except Exception:
@@ -376,7 +380,9 @@ async def mock_tick(worker: str, now: datetime = None, outcome: str = "CONFIRMED
         raise
     if status != "pending_reconciliation":  # an uncertain call keeps its slot and counts until reconciled; never redialled
         await _release_slot()
-    applied = await apply_outcome(job, rec["extracted"]) if status == "completed" else None
+    # Pass the fresh job back so apply_outcome has verified_at + mock_call.
+    job_out = {**job, "status": status, "mock_call": rec}
+    applied = await apply_outcome(job_out, rec["extracted"]) if status == "completed" else None
     retry = await _plan_retry(job, now, s) if status in RETRY_OUTCOMES else None
     return {"claimed": str(jid), "result": status, "outcome": applied, "retry_job": retry, "gate": g,
             "provider_request_sent": False, "user_data": rec["request_body_user_data"], **base}

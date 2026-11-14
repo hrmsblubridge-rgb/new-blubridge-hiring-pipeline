@@ -4,12 +4,24 @@ import { Play, Stop, ListChecks, CheckCircle, XCircle } from '@phosphor-icons/re
 import { aiApi, errMsg } from '../../pages/ai-calling/aiApi';
 import { Card, SectionTitle } from './AICallingHeader';
 
+const PURPOSES = [
+    { value: '', label: 'Pick a scenario…' },
+    { value: 'booking_confirmation', label: 'Booking Confirmation' },
+    { value: 'interview_confirmation', label: 'Pre-Interview Confirmation' },
+    { value: 'missed_interview_followup', label: 'Missed-Interview Follow-up' },
+];
+
 export const BatchPanel = ({ selected, clearSelected, batches, reload, startEnabled }) => {
     const [name, setName] = useState('');
+    const [callPurpose, setCallPurpose] = useState('');
     const [checks, setChecks] = useState(null);
 
     const create = async () => {
-        try { await aiApi.post('/test-batches', { name, candidate_ids: selected }); toast.success('Test batch created (no calls started)'); setName(''); clearSelected(); reload(); }
+        if (!callPurpose) {
+            toast.error('Select a test-call scenario before creating a batch');
+            return;
+        }
+        try { await aiApi.post('/test-batches', { name, candidate_ids: selected, call_purpose: callPurpose }); toast.success('Test batch created (no calls started)'); setName(''); setCallPurpose(''); clearSelected(); reload(); }
         catch (e) { toast.error(errMsg(e)); }
     };
     const preflight = async (b) => {
@@ -27,10 +39,23 @@ export const BatchPanel = ({ selected, clearSelected, batches, reload, startEnab
             <div className="flex flex-wrap items-end gap-2">
                 <input value={name} onChange={e => setName(e.target.value)} placeholder="Batch name (optional)" data-testid="batch-name-input"
                     className="flex-1 min-w-[200px] bg-white border border-[#e5e3d8] rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-teal-500" />
-                <button onClick={create} disabled={!selected.length} data-testid="batch-create-btn" className="px-4 py-2.5 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold disabled:opacity-50">
+                <select
+                    value={callPurpose}
+                    onChange={e => setCallPurpose(e.target.value)}
+                    data-testid="batch-call-purpose-select"
+                    className="min-w-[220px] bg-white border border-[#e5e3d8] rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-teal-500"
+                >
+                    {PURPOSES.map(p => (
+                        <option key={p.value} value={p.value} disabled={p.value === ''}>{p.label}</option>
+                    ))}
+                </select>
+                <button onClick={create} disabled={!selected.length || !callPurpose} data-testid="batch-create-btn" className="px-4 py-2.5 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold disabled:opacity-50">
                     Create batch from {selected.length} selected
                 </button>
             </div>
+            <p className="text-[11px] text-[#6b7280] mt-1" data-testid="batch-purpose-hint">
+                Scenario is mandatory — it isolates the test batch to a single call purpose so results stay unambiguous.
+            </p>
             <div className="mt-4 space-y-2">
                 {batches.length === 0 && <p className="text-sm text-[#9b9787]" data-testid="batch-empty">No batches yet. Select approved candidates above.</p>}
                 {batches.map(b => (

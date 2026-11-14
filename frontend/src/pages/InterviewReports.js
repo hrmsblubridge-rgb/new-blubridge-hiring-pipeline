@@ -19,7 +19,48 @@ const COLUMNS = [
     { key: 'job_role', label: 'JOB ROLE', sortable: true },
     { key: 'college_type', label: 'COLLEGE TYPE', sortable: true },
     { key: 'attendance', label: 'ATTENDANCE', sortable: true },
+    { key: 'ai_call', label: 'AI CALL', sortable: false },
 ];
+
+// Enhancement 2 Session 2 — compact AI-call cell. Shows the latest verified
+// outcome across the three purposes (booking → confirmation → missed, in
+// priority order) plus an HR-review badge when any purpose needs follow-up.
+function renderAiCell(r) {
+    const calls = r.ai_calls || {};
+    const order = ['booking_confirmation', 'interview_confirmation', 'missed_interview_followup'];
+    let latest = null;
+    let latestPurpose = null;
+    for (const p of order) {
+        const l = calls[p];
+        if (l && l.outcome && (!latest || String(l.verified_at || '') > String(latest.verified_at || ''))) {
+            latest = l;
+            latestPurpose = p;
+        }
+    }
+    const hr = !!r.ai_needs_hr_review;
+    if (!latest && !hr) return <span className="text-zinc-600 text-xs">—</span>;
+    return (
+        <span className="inline-flex items-center gap-1.5">
+            {latest && (
+                <span
+                    data-testid={`report-ai-outcome-${latestPurpose}`}
+                    title={`${latestPurpose} · ${latest.outcome}`}
+                    className="px-2 py-0.5 text-[11px] rounded bg-cyan-900/40 text-cyan-300 border border-cyan-800/50"
+                >
+                    {latest.concise_reason || latest.outcome}
+                </span>
+            )}
+            {hr && (
+                <span
+                    data-testid="report-ai-hr-flag"
+                    className="px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-900/40 text-amber-300 border-amber-800/50"
+                >
+                    HR Review
+                </span>
+            )}
+        </span>
+    );
+}
 
 export default function InterviewReports() {
     const navigate = useNavigate();
@@ -281,7 +322,7 @@ export default function InterviewReports() {
                             ))}
                         </tr></thead>
                         <tbody>
-                            {data.length === 0 ? <tr><td colSpan={7} className="px-4 py-16 text-center text-zinc-500">No records found.</td></tr> :
+                            {data.length === 0 ? <tr><td colSpan={8} className="px-4 py-16 text-center text-zinc-500">No records found.</td></tr> :
                             data.map((r, i) => (
                                 <tr key={i} className="border-b border-zinc-800/50 hover:bg-zinc-900/50" data-testid={`report-row-${i}`}>
                                     <td className="px-4 py-3 font-medium whitespace-nowrap">{r.name}</td>
@@ -291,6 +332,9 @@ export default function InterviewReports() {
                                     <td className="px-4 py-3 text-zinc-400 whitespace-nowrap">{r.job_role}</td>
                                     <td className="px-4 py-3 whitespace-nowrap"><span className={`px-2 py-0.5 text-xs rounded ${r.college_type?.includes('Non') ? 'bg-zinc-800 text-zinc-400' : 'bg-cyan-900/40 text-cyan-400'}`}>{r.college_type}</span></td>
                                     <td className="px-4 py-3 whitespace-nowrap"><span className={`px-2 py-0.5 text-xs rounded ${r.attendance === 'Attended' ? 'bg-emerald-900/40 text-emerald-400' : 'bg-orange-900/40 text-orange-400'}`}>{r.attendance}</span></td>
+                                    <td className="px-4 py-3 whitespace-nowrap" data-testid={`report-ai-cell-${i}`}>
+                                        {renderAiCell(r)}
+                                    </td>
                                 </tr>
                             ))}
                         </tbody>
