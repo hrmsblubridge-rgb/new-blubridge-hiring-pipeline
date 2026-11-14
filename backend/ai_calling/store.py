@@ -31,6 +31,15 @@ SETTINGS_DEFAULTS = {
     "confirm_window_start": "10:00", "confirm_window_end": "19:00",
     "missed_enabled": True, "missed_offset_minutes": 60, "missed_retry_minutes": 30,
     "missed_window_start": "10:00", "missed_window_end": "19:30", "missed_followup_hours": 24,
+    # Enhancement 2 — booking_confirmation purpose. Defaults OFF, requires
+    # explicit admin opt-in which also stamps booking_activated_at (immutable
+    # once set; prevents retroactive sweeps of historical bookings).
+    "booking_enabled": False,
+    "booking_target_hours": 3,
+    "booking_retry_minutes": 30,
+    "booking_window_start": "10:00",
+    "booking_window_end": "19:00",
+    "booking_activated_at": None,
     "daily_call_limit": 20,
     "max_concurrent_calls": 1,
     "call_window_start": "10:00",

@@ -6082,4 +6082,21 @@ async def schedule_interview(token: str, data: ScheduleBody):
     # that accepts an OTP for attendance. Returning the OTP in this public
     # response was unnecessary and allowed anyone holding the scheduling
     # link to read the OTP. It is no longer returned.
+
+    # Enhancement 2 — enqueue booking_confirmation call on successful booking.
+    # The hook is idempotent by (registration_id, "booking_confirmation",
+    # booking_key); respects the feature-activation boundary and ON/OFF flag.
+    try:
+        reg_after = await _db.bb_registrations.find_one({"_id": reg["_id"]})
+        if reg_after:
+            from ai_calling.booking_confirm import enqueue_on_booking, cancel_obsolete
+            # If this was a changed-slot reschedule, cancel obsolete jobs for
+            # prior booking keys before enqueueing the new one.
+            if is_reschedule:
+                from ai_calling.dryrun import booking_key as _bkey
+                await cancel_obsolete(str(reg_after["_id"]), _bkey(reg_after))
+            await enqueue_on_booking(reg_after)
+    except Exception as _e:
+        _logger.warning(f"[Enh2] booking_confirmation enqueue skipped: {_e}")
+
     return {"success": True, "is_reschedule": is_reschedule}

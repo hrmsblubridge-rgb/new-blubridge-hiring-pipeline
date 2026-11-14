@@ -400,6 +400,14 @@ async def safety_status(request: Request):
 class BatchBody(BaseModel):
     name: str = ""
     candidate_ids: List[str]
+    # Enhancement 2 §27A — mandatory test-call scenario selector. Backend
+    # enforces the same whitelist that the UI shows, so API clients cannot
+    # bypass it.
+    call_purpose: str
+
+    @classmethod
+    def _valid_purposes(cls):
+        return {"booking_confirmation", "interview_confirmation", "missed_interview_followup"}
 
 
 @ai_router.get("/test-batches")
@@ -415,13 +423,21 @@ async def create_batch(body: BatchBody, request: Request):
     ids = list(dict.fromkeys(body.candidate_ids))
     if not ids:
         raise HTTPException(400, "Select at least one consented test candidate")
+    purpose = (body.call_purpose or "").strip()
+    if purpose not in BatchBody._valid_purposes():
+        raise HTTPException(
+            400,
+            "call_purpose must be one of: booking_confirmation, "
+            "interview_confirmation, missed_interview_followup",
+        )
     oids = [_oid(i) for i in ids]
     ok = await db().ai_test_candidates.count_documents({"_id": {"$in": oids}, "consent_status": "granted", "opted_out": {"$ne": True}})
     if ok != len(ids):
         raise HTTPException(400, "Only consented, non-opted-out test candidates can be added to a batch")
     s = await get_settings()
     doc = {"name": body.name.strip() or f"Test batch {now_iso()[:16]}", "candidate_ids": ids, "mode": "testing",
-           "status": "draft", "mode_version": s["mode_version"], "created_by": user, "created_at": now_iso()}
+           "status": "draft", "mode_version": s["mode_version"], "created_by": user, "created_at": now_iso(),
+           "call_purpose": purpose}
     res = await db().ai_test_batches.insert_one(doc)
     doc["_id"] = res.inserted_id
     return serialize(doc)

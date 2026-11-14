@@ -1,4 +1,4 @@
-"""Two calling purposes: pre-interview confirmation and OTP-based missed-interview follow-up.
+"""Three calling purposes (Enhancement 2 added booking_confirmation): pre-interview confirmation, OTP-based missed-interview follow-up, and booking_confirmation.
 Pure planning/eligibility + outcome handling + admin scheduling settings + review alerts.
 Nothing here dials, edits bookings, or touches otp_verified (read-only source of truth)."""
 from datetime import datetime, timedelta
@@ -6,13 +6,14 @@ from datetime import datetime, timedelta
 from bson import ObjectId
 from fastapi import APIRouter, Body, HTTPException, Request
 
+from .booking_confirm import BOOKING, plan_booking_confirmation, should_skip_min_6h_gap  # noqa: F401
 from .dryrun import IST, MIN_LEAD, STATUS_REASON, TRUTHY_OTP, _ceil5, booking_key, interview_at, into_window, plan_booking
 from .provider import _auth, _csrf
 from .store import SETTINGS_ID, db, get_settings, normalize_phone, now_iso
 
 purposes_router = APIRouter()
 CONFIRM, MISSED = "interview_confirmation", "missed_interview_followup"
-PURPOSES = (CONFIRM, MISSED)
+PURPOSES = (CONFIRM, MISSED, BOOKING)
 MISSED_STATUSES = ("Interview Scheduled", "Missed")  # "Missed" is set automatically by bg_workers WORKER E
 RETRY_OUTCOMES = ("no_answer", "busy")  # provider-confirmed, no conversation
 MISSED_BLOCKING_ALERTS = ("RESCHEDULE_REQUEST_PENDING", "RUNNING_LATE", "CLAIMS_ATTENDED")
@@ -111,6 +112,11 @@ def plan_missed(b: dict, now: datetime, s: dict) -> dict:
 def plan_for(purpose: str, b: dict, now: datetime, s: dict) -> dict:
     if purpose == MISSED:
         return plan_missed(b, now, s)
+    if purpose == BOOKING:
+        b3 = {**b, "ai_call_consent": {**(b.get("ai_call_consent") or {}),
+                                        "status": "granted" if consent_covers(b.get("ai_call_consent"), BOOKING) else
+                                        (b.get("ai_call_consent") or {}).get("status")}}
+        return plan_booking_confirmation(b3, now, s)
     b2 = {**b, "ai_call_consent": {**(b.get("ai_call_consent") or {}),
                                    "status": "granted" if consent_covers(b.get("ai_call_consent"), CONFIRM) else
                                    (b.get("ai_call_consent") or {}).get("status")}}
@@ -210,6 +216,15 @@ async def get_scheduling(request: Request):
                                           "window": [s["missed_window_start"], s["missed_window_end"]],
                                           "followup_period_hours": s["missed_followup_hours"],
                                           "attendance_source": "Existing employee OTP verification (read-only)"},
+            "booking_confirmation": {"enabled": bool(s.get("booking_enabled", False)),
+                                     "target_hours": int(s.get("booking_target_hours", 3)),
+                                     "target_range_hours": [1, 24],
+                                     "max_retries": 1,
+                                     "retry_minutes": int(s.get("booking_retry_minutes", 30)),
+                                     "window": [s.get("booking_window_start", "10:00"),
+                                                s.get("booking_window_end", "19:00")],
+                                     "activated_at": s.get("booking_activated_at"),
+                                     "note": "Independent ON/OFF. Dispatch still gated by Emergency Stop, Live Calling Stop and AI_CALLING_ENABLED."},
             "capacity": {k: s[k] for k in ("live_daily_call_limit", "live_pilot_daily_cap", "live_max_concurrent_calls", "live_queue_capacity")}}
 
 
@@ -224,8 +239,16 @@ async def put_scheduling(request: Request, body: dict = Body(...)):  # noqa: B00
         if not isinstance(v, SCHEDULING_KEYS[k]) or (SCHEDULING_KEYS[k] is int and isinstance(v, bool)):
             raise HTTPException(400, f"{k} has the wrong type")
         upd[k] = v
-    limits = {"confirm_offset_days": (1, 7), "missed_offset_minutes": (60, 10080), "live_daily_call_limit": (0, 100000),
+    limits = {"confirm_offset_days": (1, 7), "missed_offset_minutes": (60, 10080),
+              "booking_target_hours": (1, 24), "booking_retry_minutes": (15, 240),
+              "live_daily_call_limit": (0, 100000),
               "live_pilot_daily_cap": (0, 100000), "live_max_concurrent_calls": (1, 50), "live_queue_capacity": (1, 1000)}
+    # Feature-activation stamp: flipping booking_enabled ON writes an immutable
+    # activation timestamp (spec §21). Flipping OFF does not clear it.
+    if upd.get("booking_enabled") is True:
+        before_s = await get_settings()
+        if not before_s.get("booking_activated_at"):
+            upd["booking_activated_at"] = now_iso()
     for k, (lo, hi) in limits.items():
         if k in upd and not lo <= upd[k] <= hi:
             raise HTTPException(400, f"{k} must be {lo}–{hi}")

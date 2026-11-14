@@ -4589,6 +4589,16 @@ except Exception:
     traceback.print_exc()
     raise
 
+# Include Enhancement 2 — automatic rescheduling-link delivery module
+try:
+    from bb_reschedule_link import init_reschedule_link, ensure_indexes as rl_idx
+    init_reschedule_link(db)
+    app.add_event_handler("startup", rl_idx)
+except Exception:
+    import traceback
+    traceback.print_exc()
+    raise
+
 # Include Help / Templates module (iter67)
 try:
     from bb_help import help_router
