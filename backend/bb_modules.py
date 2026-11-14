@@ -6076,4 +6076,10 @@ async def schedule_interview(token: str, data: ScheduleBody):
             f"confirmation send for {email} — OTP worker may now fire"
         )
 
-    return {"success": True, "is_reschedule": is_reschedule, "otp": otp}
+    # Enhancement 1 — security fix (iter65). The OTP is delivered to the
+    # candidate via the authenticated WhatsApp/email dispatch above; the
+    # employee /api/bb/verify-otp endpoint (auth-required) is the only path
+    # that accepts an OTP for attendance. Returning the OTP in this public
+    # response was unnecessary and allowed anyone holding the scheduling
+    # link to read the OTP. It is no longer returned.
+    return {"success": True, "is_reschedule": is_reschedule}

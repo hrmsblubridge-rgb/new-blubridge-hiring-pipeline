@@ -255,14 +255,54 @@ def _registration_summary(reg: dict, cfg: dict) -> dict:
     }
 
 
-async def _append_response(reg: dict, response: dict):
-    """Idempotent insert into history by `submission_nonce`."""
+async def _append_response(reg: dict, response: dict) -> dict:
+    """Idempotent insert into history by `submission_nonce`.
+
+    Returns the stored document (either the newly inserted one or the existing
+    one if the nonce already exists). Also raises 409 if the same nonce is
+    replayed with a materially different payload.
+    """
+    nonce = response.get("submission_nonce")
+    registration_id = response.get("registration_id")
+    if nonce:
+        existing = await _db.bb_availability_responses.find_one(
+            {"submission_nonce": nonce}, {"_id": 0}
+        )
+        if existing:
+            # Nonce reuse with a different payload is a client bug — reject.
+            differ_keys = ("registration_id", "response_type", "availability",
+                           "reason_id", "other_text", "withdraw_decision",
+                           "reactivation_choice")
+            for k in differ_keys:
+                if response.get(k) != existing.get(k):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="A different response was already recorded for this submission nonce.",
+                    )
+            return existing
     try:
         await _db.bb_availability_responses.insert_one(response)
+        return response
     except Exception as e:
-        # Duplicate nonce = idempotent replay; swallow silently
+        # Race on unique index — re-read and return original.
         import logging
-        logging.getLogger("bb_availability").info(f"history insert skipped: {e}")
+        logging.getLogger("bb_availability").info(f"history insert race: {e}")
+        if nonce:
+            existing = await _db.bb_availability_responses.find_one(
+                {"submission_nonce": nonce}, {"_id": 0}
+            )
+            if existing:
+                return existing
+        return response
+
+
+async def _already_submitted(nonce: Optional[str]) -> Optional[dict]:
+    """Return the prior row for this nonce if it exists, else None."""
+    if not nonce:
+        return None
+    return await _db.bb_availability_responses.find_one(
+        {"submission_nonce": nonce}, {"_id": 0}
+    )
 
 
 # =========================================================================
@@ -323,6 +363,21 @@ async def submit_availability(token: str, body: AvailabilityBody):
         raise HTTPException(status_code=410, detail="This application has been superseded by a newer registration.")
 
     cfg = await _get_current_config()
+
+    # Idempotency: if we've already saved this nonce, validate payload and replay.
+    prior = await _already_submitted(body.submission_nonce)
+    if prior and prior.get("response_type") == "availability":
+        # Payload consistency check: nonce reuse with different payload → 409.
+        if (prior.get("availability") != bool(body.availability)
+                or prior.get("reason_id") != (body.reason_id or None)
+                or prior.get("other_text") != (body.other_text or None)):
+            raise HTTPException(
+                status_code=409,
+                detail="A different response was already recorded for this submission nonce.",
+            )
+        reg2 = await _reg_by_token(token)
+        return {"ok": True, "idempotent": True, "candidate": _registration_summary(reg2, cfg)}
+
     active_ids = _active_reason_ids(cfg)
     reason_id = body.reason_id or None
     other_text = body.other_text or None
@@ -414,8 +469,13 @@ async def submit_withdraw(token: str, body: WithdrawBody):
         raise HTTPException(status_code=410, detail="Application superseded.")
 
     cfg = await _get_current_config()
+    # Idempotency — same nonce replay returns the stored state.
+    prior = await _already_submitted(body.submission_nonce)
+    if prior and prior.get("response_type") == "withdrawal":
+        return {"ok": True, "idempotent": True, "candidate": _registration_summary(reg, cfg)}
+
     if reg.get("withdrawn_by_candidate"):
-        # Idempotent: return current state.
+        # Already withdrawn by a prior request — idempotent 200.
         return {"ok": True, "idempotent": True, "candidate": _registration_summary(reg, cfg)}
 
     if not body.confirmed:
@@ -424,8 +484,10 @@ async def submit_withdraw(token: str, body: WithdrawBody):
         raise HTTPException(status_code=409, detail="Withdrawal is only available after answering NO.")
 
     now = _now_iso()
-    await _db.bb_registrations.update_one(
-        {"_id": reg["_id"]},
+    # Conditional atomic update: only flip when still not-withdrawn. Prevents
+    # a second request that slips past the check above from firing side-effects.
+    upd = await _db.bb_registrations.update_one(
+        {"_id": reg["_id"], "withdrawn_by_candidate": {"$ne": True}},
         {"$set": {
             "withdrawn_by_candidate": True,
             "withdrawn_at": now,
@@ -434,6 +496,10 @@ async def submit_withdraw(token: str, body: WithdrawBody):
             "withdrawal_other_text": reg.get("chennai_availability_other_text"),
         }},
     )
+    if upd.modified_count == 0:
+        # A concurrent writer got there first — return idempotent 200.
+        reg2 = await _reg_by_token(token)
+        return {"ok": True, "idempotent": True, "candidate": _registration_summary(reg2, cfg)}
     nonce = body.submission_nonce or uuid.uuid4().hex
     await _append_response(reg, {
         "registration_id": str(reg["_id"]),
@@ -496,10 +562,23 @@ async def submit_reactivate(token: str, body: ReactivateBody):
         raise HTTPException(status_code=404, detail="Invalid or expired link")
     if reg.get("superseded"):
         raise HTTPException(status_code=410, detail="Application superseded.")
+
+    cfg = await _get_current_config()
+    # Idempotency replay — must come BEFORE the "not withdrawn" state check,
+    # otherwise a replay of a successful YES reactivation would 409 because
+    # the candidate is already reactivated.
+    prior = await _already_submitted(body.submission_nonce)
+    if prior and prior.get("response_type") == "reactivation":
+        if prior.get("reactivation_choice") != body.choice:
+            raise HTTPException(
+                status_code=409,
+                detail="A different reactivation choice was already recorded for this submission nonce.",
+            )
+        return {"ok": True, "idempotent": True, "candidate": _registration_summary(reg, cfg)}
+
     if not reg.get("withdrawn_by_candidate"):
         raise HTTPException(status_code=409, detail="Application is not in a withdrawn state.")
 
-    cfg = await _get_current_config()
     now = _now_iso()
     choice = body.choice
 
@@ -510,19 +589,26 @@ async def submit_reactivate(token: str, body: ReactivateBody):
                 status_code=409,
                 detail="This application is no longer eligible for an interview.",
             )
-        set_fields = {
-            "withdrawn_by_candidate": False,
-            "reactivated_at": now,
-            "reactivation_count": int(reg.get("reactivation_count") or 0) + 1,
-            # YES answer snapshot
-            "chennai_availability_latest": True,
-            "chennai_availability_latest_at": now,
-            "chennai_availability_reason_id": None,
-            "chennai_availability_reason_text": None,
-            "chennai_availability_other_text": None,
-            "chennai_availability_withdraw_decision": False,
-        }
-        await _db.bb_registrations.update_one({"_id": reg["_id"]}, {"$set": set_fields})
+        # Conditional atomic update — only flip if still withdrawn.
+        upd = await _db.bb_registrations.update_one(
+            {"_id": reg["_id"], "withdrawn_by_candidate": True},
+            {"$set": {
+                "withdrawn_by_candidate": False,
+                "reactivated_at": now,
+                # YES answer snapshot
+                "chennai_availability_latest": True,
+                "chennai_availability_latest_at": now,
+                "chennai_availability_reason_id": None,
+                "chennai_availability_reason_text": None,
+                "chennai_availability_other_text": None,
+                "chennai_availability_withdraw_decision": False,
+            },
+             "$inc": {"reactivation_count": 1}},
+        )
+        if upd.modified_count == 0:
+            # Already reactivated by a concurrent writer — idempotent return.
+            reg2 = await _reg_by_token(token)
+            return {"ok": True, "idempotent": True, "candidate": _registration_summary(reg2, cfg)}
     elif choice == "no":
         # Stay withdrawn — just record the decision.
         pass
@@ -681,21 +767,50 @@ async def admin_publish(request: Request, body: DraftBody):
     )
     cleaned = _validate_draft(body.config)
     cur = await _get_current_config()
-    next_version = int(cur.get("version") or 1) + 1
     now = _now_iso()
+    # Atomic monotonically-increasing version allocation using a counter doc.
+    # Two concurrent publishes will receive different values because $inc is
+    # atomic in MongoDB.
+    from pymongo import ReturnDocument
+    counter = await _db.bb_availability_counter.find_one_and_update(
+        {"_id": "question_version"},
+        {"$inc": {"value": 1}, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    seeded_value = int(counter.get("value") or 1)
+    # Ensure the counter never slips below current published version (seed-up).
+    if seeded_value <= int(cur.get("version") or 1):
+        counter = await _db.bb_availability_counter.find_one_and_update(
+            {"_id": "question_version"},
+            {"$set": {"value": int(cur.get("version") or 1) + 1}},
+            return_document=ReturnDocument.AFTER,
+        )
+        seeded_value = int(counter.get("value"))
+    next_version = seeded_value
     new_doc = {
         **cleaned,
         "version": next_version,
         "published_at": now,
         "published_by": username,
     }
-    await _db.bb_availability_question_versions.update_one(
-        {"version": next_version},
-        {"$setOnInsert": {**new_doc, "snapshot_at": now}},
-        upsert=True,
-    )
+    # Insert the immutable version row FIRST — unique index on `version`
+    # guarantees only one writer wins if races slip through the counter.
+    try:
+        await _db.bb_availability_question_versions.insert_one({**new_doc, "snapshot_at": now})
+    except Exception:
+        # Unique conflict → pick the next available slot.
+        counter = await _db.bb_availability_counter.find_one_and_update(
+            {"_id": "question_version"},
+            {"$inc": {"value": 1}},
+            return_document=ReturnDocument.AFTER,
+        )
+        next_version = int(counter.get("value"))
+        new_doc["version"] = next_version
+        await _db.bb_availability_question_versions.insert_one({**new_doc, "snapshot_at": now})
+    # Now atomically update current only if the new version is strictly greater.
     await _db.bb_availability_question_config.update_one(
-        {"_id": "current"},
+        {"_id": "current", "$or": [{"version": {"$lt": next_version}}, {"version": {"$exists": False}}]},
         {"$set": new_doc},
         upsert=True,
     )

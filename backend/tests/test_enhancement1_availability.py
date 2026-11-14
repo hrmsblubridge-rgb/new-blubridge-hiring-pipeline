@@ -65,11 +65,27 @@ def seed_reg(mdb):
         mdb.bb_availability_responses.delete_many({"schedule_token": {"$in": created_tokens}})
 
 
+def _admin_password() -> str:
+    pw = os.environ.get("TEST_ADMIN_PASSWORD")
+    if not pw:
+        try:
+            from pathlib import Path
+            for line in Path("/app/backend/.env").read_text().splitlines():
+                if line.startswith("TEST_ADMIN_PASSWORD="):
+                    pw = line.partition("=")[2].strip().strip('"').strip("'")
+                    break
+        except Exception:
+            pw = None
+    if not pw:
+        pytest.skip("TEST_ADMIN_PASSWORD env var not set")
+    return pw
+
+
 @pytest.fixture(scope="session")
 def admin_session():
     s = requests.Session()
     r = s.post(f"{API}/login",
-               json={"username": "Admin User", "password": "QAZwsx##123"},
+               json={"username": "Admin User", "password": _admin_password()},
                timeout=10)
     assert r.status_code == 200, r.text
     return s
@@ -88,7 +104,9 @@ class TestPublicAvailabilityRead:
         r = requests.get(f"{API}/pub/availability/{reg['schedule_token']}", timeout=10)
         assert r.status_code == 200
         body = r.json()
-        assert body["config"]["main_question"].startswith("Are you available")
+        # Config schema sanity (admins may freely edit text; we assert structure).
+        assert isinstance(body["config"].get("main_question"), str) and body["config"]["main_question"].strip()
+        assert isinstance(body["config"].get("reason_options"), list)
         assert body["candidate"]["latest_availability"] is None
         assert body["candidate"]["has_booking"] is False
         assert body["candidate"]["withdrawn"] is False
@@ -339,7 +357,9 @@ class TestAdminConfig:
         r = admin_session.get(f"{API}/bb/availability-question/current", timeout=10)
         assert r.status_code == 200
         cfg = r.json()
-        assert cfg["main_question"].startswith("Are you available")
+        # Admins can edit text freely; assert structural integrity instead.
+        assert isinstance(cfg.get("main_question"), str) and cfg["main_question"].strip()
+        assert isinstance(cfg.get("reason_options"), list) and cfg["reason_options"]
         assert cfg["version"] >= 1
 
     def test_unauth_cannot_read_current(self):
