@@ -8,6 +8,13 @@ import { StateBadge, fmtTime } from '../../components/ai-calling/callFormat';
 
 const LIVE_STATES = ['Pending', 'In Progress'];
 
+// Enhancement 2 §27A — display the mandatory test-call scenario in Call History.
+const PURPOSE_LABELS = {
+    booking_confirmation: 'Booking Confirmation',
+    interview_confirmation: 'Pre-Interview Confirmation',
+    missed_interview_followup: 'Missed-Interview Follow-up',
+};
+
 export default function CallHistory() {
     const [mode, setMode] = useState('testing');
     const [items, setItems] = useState([]);
@@ -38,13 +45,14 @@ export default function CallHistory() {
                         <div className="overflow-x-auto">
                             <table className="w-full text-sm">
                                 <thead className="text-[11px] uppercase tracking-wider text-[#9b9787]">
-                                    <tr>{['Candidate', 'Phone', 'Call time', 'State', 'Bolna status', 'Duration', 'Attendance'].map(h => <th key={h} className="px-2 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}</tr>
+                                    <tr>{['Candidate', 'Phone', 'Scenario', 'Call time', 'State', 'Bolna status', 'Duration', 'Attendance'].map(h => <th key={h} className="px-2 py-2 text-left font-semibold whitespace-nowrap">{h}</th>)}</tr>
                                 </thead>
                                 <tbody>
                                     {items.map(c => (
                                         <tr key={c.id} onClick={() => open(c.id)} data-testid={`history-row-${c.id}`} className={`border-t border-[#efede5] cursor-pointer hover:bg-[#faf9f1] ${sel?.id === c.id ? 'bg-[#faf9f1]' : ''}`}>
                                             <td className="px-2 py-2 font-semibold">{c.candidate_name}</td>
                                             <td className="px-2 py-2 font-mono text-xs">{c.phone_masked}</td>
+                                            <td className="px-2 py-2 whitespace-nowrap" data-testid={`history-row-${c.id}-purpose`}>{PURPOSE_LABELS[c.purpose] || c.purpose || '—'}</td>
                                             <td className="px-2 py-2 whitespace-nowrap">{fmtTime(c.dispatched_at || c.created_at)}</td>
                                             <td className="px-2 py-2"><StateBadge s={c.ui_state} /></td>
                                             <td className="px-2 py-2">{c.status || '—'}</td>

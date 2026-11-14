@@ -29,6 +29,12 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - `BatchPanel.jsx` — batch rows now show "scenario: …" (`data-testid=batch-row-<id>-purpose`).
 - `/app/memory/test_credentials.md` corrected (password is `QAZwsx##123`, not `Admin User`).
 
+### 2026-02-14 — P0 Testing Mode single-call scenario selector
+- `frontend/src/components/ai-calling/CallNowDialog.jsx` — Added mandatory "Test-call scenario" `<select>` (Booking Confirmation, Pre-Interview Confirmation, Missed-Interview Follow-up) with non-selectable "Pick a scenario…" placeholder. Chosen scenario is sent to `/test-candidates/{id}/call-now` as `call_purpose`, mirrored in the recipient summary row (`data-testid=call-now-scenario`) and surfaced in the success toast. Call-now button is `disabled` until both the exact name is typed and a scenario is picked; tooltip explains which gate is unmet.
+- `backend/ai_calling/dispatch.py` — `call_now` no longer defaults to `interview_confirmation`; requests must send one of `booking_confirmation | interview_confirmation | missed_interview_followup`, otherwise the API returns 400 with the whitelist message. Enforcement applies identically to the batch endpoint, so API clients cannot bypass the selector.
+- `frontend/src/pages/ai-calling/CallHistory.js` — Test Call History rows render the chosen scenario label (`PURPOSE_LABELS`), so admins can audit exactly which scenario was used for every historical single/batch call.
+- Verified via screenshot on `/ai-calling/testing` (dropdown visible, Call-now disabled until scenario + name match) and CSRF-aware curl showing 400 on missing/invalid `call_purpose`. Safety invariants intact: `hiring_ai_testing` only, Bolna mocked.
+
 ### 2026-02-14 — Live Mode UI parity fix
 - `frontend/src/pages/ai-calling/LiveMode.js` — "Automatic calling workflows" grid now renders all **three** cards: Booking Confirmation (OFF, default 3 h, retry +30 min, 10:00–19:00 IST window, ≥ 6 h gap before any Pre-Interview Confirmation), Pre-Interview Confirmation, and Missed-Interview Follow-up (OTP-based). Subtitle updated to "Three automatic calling workflows — dispatch remains blocked". Booking Confirmation toggle state surfaced via `data-testid=live-workflow-booking-state` (OFF).
 - Verified via screenshot on `/ai-calling/live`: all 3 cards visible, Booking OFF, Emergency Stop ON, Live Calling Stop ON — no safety gate released, no settings mutated.
