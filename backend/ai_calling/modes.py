@@ -27,11 +27,26 @@ CONSENT_TEXT = ("I agree to receive automated AI voice calls from BluBridge Tech
                 "to book or attend an interview.")
 CONSENT_SCOPES = {"2026-06-v2": ["interview_confirmation"], "2026-06-v3": ["interview_confirmation"],
                   "2026-06-v4": ["interview_confirmation", "missed_interview_followup"]}
+# Default scope applied to newly-published consent versions (i.e. any admin publish
+# whose version_id is not in the legacy CONSENT_SCOPES map). Matches the latest
+# known hardcoded scope so Enhancement 1 behaviour stays identical; existing live-call
+# gates (emergency stop, authorization, dispatch flags) are unchanged.
+DEFAULT_PUBLISHED_SCOPE = ["interview_confirmation", "missed_interview_followup"]
 
 
 def scope_for(version) -> list:
-    """Earlier wording never covered the missed-interview follow-up; it is not silently upgraded."""
-    return list(CONSENT_SCOPES.get(version or "", []))
+    """Earlier legacy wording never covered the missed-interview follow-up; it is not
+    silently upgraded. Newly admin-published versions (not in the legacy map) grant
+    the default published scope defined above."""
+    v = version or ""
+    if v in CONSENT_SCOPES:
+        return list(CONSENT_SCOPES[v])
+    # Admin-published version_ids follow the "consent-YYYY-MM-DD-<micros>" pattern
+    # from admin_auth.publish_version. Treat anything that isn't a legacy-mapped
+    # string as a published version and apply the default published scope.
+    if v.startswith("consent-"):
+        return list(DEFAULT_PUBLISHED_SCOPE)
+    return []
 
 
 LIVE_AUTH_PHRASE = "AUTHORIZE LIVE DISPATCH"

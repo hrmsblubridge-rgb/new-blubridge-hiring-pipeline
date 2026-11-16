@@ -50,6 +50,27 @@ def top_level_admins() -> set:
     return {u.strip() for u in os.environ.get("AI_TOP_LEVEL_ADMINS", "").split(",") if u.strip()}
 
 
+async def get_published_consent() -> dict:
+    """Return the currently-published consent wording.
+
+    Reads the most recent document from `ai_consent_versions` (the authoritative
+    store written by `POST /admin-auth/consent/publish`). Falls back to the
+    hard-coded `CONSENT_TITLE / CONSENT_TEXT / CONSENT_TEXT_VERSION` constants
+    only when nothing has been published yet, which preserves pre-publish and
+    legacy-test behaviour. Draft documents in `ai_consent_drafts` are NEVER
+    returned to the candidate-facing page.
+
+    Shape: {"title": str, "text": str, "version": str}
+    """
+    try:
+        latest = await db().ai_consent_versions.find_one(sort=[("published_at", -1)])
+    except Exception:  # noqa: BLE001 — treat DB hiccups as "fall back to defaults"
+        latest = None
+    if latest and latest.get("version_id") and latest.get("title") and latest.get("text"):
+        return {"title": latest["title"], "text": latest["text"], "version": latest["version_id"]}
+    return {"title": CONSENT_TITLE, "text": CONSENT_TEXT, "version": CONSENT_TEXT_VERSION}
+
+
 async def ensure_consent_indexes():
     await db().ai_consent_tokens.create_index("token_hash", unique=True)
     await db().ai_consent_tokens.create_index([("registration_id", 1), ("revoked_at", 1)])
@@ -140,23 +161,31 @@ async def invalidate_pending(reg_id: str, reason: str) -> int:
     return n
 
 
-async def record_consent(reg_id: str, status: str, source: str, actor: str, bkey: str = None) -> dict:
+async def record_consent(reg_id: str, status: str, source: str, actor: str, bkey: str = None,
+                         text_version: str = None) -> dict:
+    """Stamp the stored consent with the EXACT version the candidate accepted
+    (passed in by the caller after validating it matches the currently-published
+    wording). Falls back to the latest published version for server-initiated
+    status changes (withdrawal, admin actions) where no candidate submission
+    exists."""
     now = now_iso()
-    st = {"consent_status": status, "consent_source": source, "consent_text_version": CONSENT_TEXT_VERSION,
-          "consent_scope": scope_for(CONSENT_TEXT_VERSION) if status == "granted" else [], "updated_at": now, "last_change_at": now}
+    if not text_version:
+        text_version = (await get_published_consent())["version"]
+    st = {"consent_status": status, "consent_source": source, "consent_text_version": text_version,
+          "consent_scope": scope_for(text_version) if status == "granted" else [], "updated_at": now, "last_change_at": now}
     if status == "granted":
         st.update(consent_timestamp=now, consent_withdrawn_at=None)
     elif status == "withdrawn":
         st["consent_withdrawn_at"] = now
     upd = {"$set": st, "$setOnInsert": {"registration_id": reg_id, "do_not_call": False, "dnc_sources": [], "created_at": now},
            "$push": {"history": {"type": "consent", "status": status, "source": source, "by": actor, "at": now,
-                                 "text_version": CONSENT_TEXT_VERSION}}}
+                                 "text_version": text_version}}}
     if bkey:
         upd["$addToSet"] = {"booking_form_keys": bkey}
     await db().ai_candidate_consents.update_one({"registration_id": reg_id}, upd, upsert=True)
     if status != "granted":
         await invalidate_pending(reg_id, f"consent_{status}")
-    await _audit(f"consent_{status}", actor, reg_id, {"source": source, "text_version": CONSENT_TEXT_VERSION})
+    await _audit(f"consent_{status}", actor, reg_id, {"source": source, "text_version": text_version})
     return await db().ai_candidate_consents.find_one({"registration_id": reg_id}, {"_id": 0, "history": 0})
 
 
@@ -204,7 +233,9 @@ async def _safe(coro_fn, reg_id: str, intended: str):
 @public_router.get("/consent-text")
 async def consent_text(response: Response):
     response.headers.update(NO_STORE)
-    return {"title": CONSENT_TITLE, "text": CONSENT_TEXT, "version": CONSENT_TEXT_VERSION, "optional": True, "default_checked": False}
+    pub = await get_published_consent()
+    return {"title": pub["title"], "text": pub["text"], "version": pub["version"],
+            "optional": True, "default_checked": False}
 
 
 @public_router.post("/booking-consent/{schedule_token}")
@@ -220,7 +251,10 @@ async def booking_decision(schedule_token: str, request: Request, response: Resp
         await _fail(request)
     if not reg.get("schedule_date"):
         raise HTTPException(409, "No interview booking found for this link")
-    if body.get("text_version") != CONSENT_TEXT_VERSION:
+    pub_version = (await get_published_consent())["version"]
+    if body.get("text_version") != pub_version:
+        # Admin published a new version while this form was open. Refuse the
+        # submission so the candidate cannot unknowingly accept different wording.
         raise HTTPException(409, "Consent wording changed. Your preference was not saved.")
     rid, bkey = str(reg["_id"]), booking_key(reg)
     status = "granted" if body.get("granted") is True else "not_given"
@@ -234,14 +268,14 @@ async def booking_decision(schedule_token: str, request: Request, response: Resp
         raise HTTPException(409, "A preference was already recorded for this booking. Use your consent-management link.") from None
 
     async def save():
-        c = await record_consent(rid, status, "booking_form", "candidate")
+        c = await record_consent(rid, status, "booking_form", "candidate", text_version=pub_version)
         return c, await issue_token(rid, "booking")
     c, token = await _safe(save, rid, status)
     return {"saved": True, "consent_status": c["consent_status"], "manage_token": token,
             "manage_expires_days": _ttl_days()}
 
 
-def _info(t: dict, c: dict) -> dict:
+def _info(t: dict, c: dict, pub: dict) -> dict:
     status = c.get("consent_status", "not_given")
     return {"first_name": (t["reg"].get("full_name") or "").split(" ")[0], "has_booking": bool(t["reg"].get("schedule_date")),
             "consent_status": status, "do_not_call": bool(c.get("do_not_call")),
@@ -250,14 +284,15 @@ def _info(t: dict, c: dict) -> dict:
             "can_grant": not t["expired"] and status != "granted" and bool(t["reg"].get("schedule_date"))
             and not set(c.get("dnc_sources") or []) & {"CANDIDATE", "AI_CALL_OPT_OUT"},
             "renewal_available": OTP_DELIVERY_APPROVED,
-            "title": CONSENT_TITLE, "text": CONSENT_TEXT, "version": CONSENT_TEXT_VERSION}
+            "title": pub["title"], "text": pub["text"], "version": pub["version"]}
 
 
 @public_router.get("/consent/manage")
 async def manage_info(request: Request, response: Response):
     response.headers.update(NO_STORE)
     t = await resolve_token(request)
-    return _info(t, await db().ai_candidate_consents.find_one({"registration_id": t["reg_id"]}) or {})
+    pub = await get_published_consent()
+    return _info(t, await db().ai_candidate_consents.find_one({"registration_id": t["reg_id"]}) or {}, pub)
 
 
 @public_router.post("/consent/manage/withdraw")
@@ -287,12 +322,13 @@ async def manage_grant(request: Request, response: Response, body: dict = Body(.
         raise HTTPException(403, "This link has expired. It can only be used to withdraw consent.")
     if not t["reg"].get("schedule_date"):
         raise HTTPException(409, "No interview booking found")
-    if body.get("text_version") != CONSENT_TEXT_VERSION:
+    pub_version = (await get_published_consent())["version"]
+    if body.get("text_version") != pub_version:
         raise HTTPException(409, "Consent wording changed. Please reload.")
     cur = await db().ai_candidate_consents.find_one({"registration_id": t["reg_id"]}, {"dnc_sources": 1}) or {}
     if set(cur.get("dnc_sources") or []) & {"CANDIDATE", "AI_CALL_OPT_OUT"}:
         raise HTTPException(409, "You asked not to receive AI calls. That request stays in place.")
-    c = await record_consent(t["reg_id"], "granted", "consent_page", "candidate")
+    c = await record_consent(t["reg_id"], "granted", "consent_page", "candidate", text_version=pub_version)
     return {"saved": True, "consent_status": c["consent_status"], "do_not_call": bool(c.get("do_not_call"))}
 
 

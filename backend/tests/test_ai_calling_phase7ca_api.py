@@ -28,8 +28,13 @@ class TestPublic:
         r = requests.get(f"{API}/public/consent-text")
         assert r.status_code == 200
         d = r.json()
-        assert d["title"] == "Optional AI Voice Call Consent"
-        assert d["version"] == "2026-06-v4"
+        # Admin-published wording wins if `ai_consent_versions` has any entries
+        # (see `ai_calling.consent.get_published_consent`); the hardcoded
+        # defaults are only served as a pre-publish fallback. Both paths must
+        # return the same shape and non-empty title / version.
+        assert isinstance(d.get("title"), str) and d["title"].strip()
+        assert isinstance(d.get("text"), str) and len(d["text"]) >= 60
+        assert isinstance(d.get("version"), str) and d["version"].strip()
         assert d["default_checked"] is False and d["optional"] is True
         assert "no-store" in r.headers.get("Cache-Control", "")
         assert r.headers.get("Referrer-Policy") == "no-referrer"

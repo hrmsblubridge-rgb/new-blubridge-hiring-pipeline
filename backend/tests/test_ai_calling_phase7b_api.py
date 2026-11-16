@@ -46,7 +46,13 @@ def test_public_consent_withdraw_unknown_404():
 
 def test_public_consent_text():
     d = requests.get(f"{API}/public/consent-text").json()
-    assert d["version"] == "2026-06-v4" and d["title"] == "Optional AI Voice Call Consent" and d["default_checked"] is False
+    # `GET /public/consent-text` now serves the admin-published wording from
+    # `ai_consent_versions` when present, with hardcoded defaults as the
+    # pre-publish fallback. Assert the shape rather than specific wording.
+    assert isinstance(d.get("title"), str) and d["title"].strip()
+    assert isinstance(d.get("text"), str) and len(d["text"]) >= 60
+    assert isinstance(d.get("version"), str) and d["version"].strip()
+    assert d["default_checked"] is False and d["optional"] is True
 
 
 # --- real bookings preview (read-only)

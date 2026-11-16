@@ -29,6 +29,65 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - `BatchPanel.jsx` — batch rows now show "scenario: …" (`data-testid=batch-row-<id>-purpose`).
 - `/app/memory/test_credentials.md` corrected (password is `QAZwsx##123`, not `Admin User`).
 
+### 2026-02-14 — P0 published AI consent now reaches candidate booking page
+**Root cause**: `GET /api/ai-calling/public/consent-text` returned the hardcoded
+`CONSENT_TITLE / CONSENT_TEXT / CONSENT_TEXT_VERSION` from `ai_calling/modes.py`
+regardless of what the top-level admin had published via
+`POST /api/ai-calling/admin-auth/consent/publish` (which writes to
+`ai_consent_versions`). The submit guard in `POST /public/booking-consent/{token}`
+compared the posted `text_version` to the same hardcoded constant, and
+`record_consent()` stamped the stored consent with that constant instead of the
+version the candidate actually saw. The admin panel was reading the correct
+source; the candidate-facing page was never wired to it.
+
+**Fix (files changed)**:
+- `backend/ai_calling/consent.py` — new `get_published_consent()` helper reads
+  the latest `ai_consent_versions` document and falls back to `modes` constants
+  only when no version has been published. `GET /public/consent-text`,
+  `_info()` (manage page), the submit version-match in `booking_decision`, and
+  `manage_grant` all route through the helper. `record_consent()` now accepts
+  a `text_version` argument so the EXACT version the candidate saw is stamped
+  on `ai_candidate_consents.consent_text_version` and on the history row;
+  server-initiated status changes (withdrawal, admin actions) fall back to the
+  current published version.
+- `backend/ai_calling/modes.py` — `scope_for()` falls back to the latest
+  published scope (`interview_confirmation`, `missed_interview_followup`) for
+  version_ids with the `consent-` prefix (i.e. newly admin-published versions),
+  so new publishes don't silently narrow scope to `[]`. Existing live-call
+  gates (emergency stop, authorization, dispatch flags) are unchanged.
+- `backend/tests/test_consent_publish_sync.py` — new regression suite (8 tests,
+  all green): published version served to candidate; draft never leaks; new
+  publish is reflected on next GET; stale `text_version` → 409 with no row
+  written; accepted/declined submissions store the EXACT published version;
+  previously accepted consents are never retroactively upgraded; pre-publish
+  fallback matches `modes.CONSENT_TEXT_VERSION`.
+- `backend/tests/test_ai_calling_phase7ca_api.py::TestPublic.test_consent_text`
+  and `backend/tests/test_ai_calling_phase7b_api.py::test_public_consent_text`
+  relaxed from hardcoded title/version assertions to shape assertions so the
+  live API suite is independent of whether an admin has published a version.
+- `/app/memory/test_credentials.md` corrected to the password noted in PRD
+  (`QAZwsx##123`) so the live API regression suite logs in successfully.
+
+**Verification**:
+- Direct curl: `GET /api/ai-calling/public/consent-text` now returns admin
+  wording and `version_id="consent-2026-11-16-1794820917329965"`.
+- Admin screenshot (`/ai-calling/settings` → Candidate AI Voice Call Consent)
+  shows the "Currently Published (live on booking form)" box and the
+  "Candidate booking-form appearance" preview rendering the identical wording.
+- Pytest: 47 consent-related tests pass in `test_ai_calling_phase7b{,_api}.py`,
+  `test_ai_calling_phase7ca{,_api}.py::TestPublic`, `test_slice234_pending_consent.py`,
+  plus 8 new tests in `test_consent_publish_sync.py` (8/8 green). The three
+  pre-existing failing tests (`test_real_preview_empty`,
+  `test_switches_live_limits`, `test_test_call_status_reasons_single_recipient`,
+  `test_readiness`) are environmental settings/data mismatches unrelated to
+  this fix and were already in the handoff backlog.
+
+**Safety invariants preserved**: `hiring_ai_testing` only, Bolna/AiSensy/Resend
+remain MOCKED, Emergency Stop ON, Live Dispatch unchanged, AI_CALLING_ENABLED
+untouched, `consent_scope` default (interview_confirmation,
+missed_interview_followup) matches the already-shipped v4 scope so no new call
+purpose is enabled by this change.
+
 ### 2026-02-14 — Candidate Interview Info: single-line fields (no word-wrap)
 - `InterviewSchedule.js` — `DetailCell` rewritten to force every value onto a single line (`whitespace-nowrap overflow-hidden text-ellipsis`) with a `title={value}` hover tooltip so long emails never break across two lines; `tabular-nums` applied to Phone / Date / Time for cleaner numeric alignment.
 - Card widened from `max-w-xl` → `max-w-2xl` so the typical candidate email (`rajlearn06@gmail.com`-sized) renders on one line on desktop. Mobile falls back to a 2-column grid; overflow is handled by ellipsis + tooltip rather than word-wrap.
