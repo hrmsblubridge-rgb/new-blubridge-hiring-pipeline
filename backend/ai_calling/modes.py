@@ -34,10 +34,36 @@ CONSENT_SCOPES = {"2026-06-v2": ["interview_confirmation"], "2026-06-v3": ["inte
 DEFAULT_PUBLISHED_SCOPE = ["interview_confirmation", "missed_interview_followup"]
 
 
+def derive_published_scope(text: str) -> list:
+    """Determine which calling purposes an admin-published wording authorizes.
+
+    Purposes are bound to explicit descriptive phrases in the wording so new
+    publishes cannot silently expand or narrow scope:
+      * ``interview_confirmation`` and ``missed_interview_followup`` are always
+        granted by any admin publish (the two legacy workflows).
+      * ``booking_confirmation`` is granted only when the phrase
+        "booking confirmation" appears in the text (case-insensitive,
+        whitespace-tolerant). Admins who wish to authorize the third workflow
+        must describe it in the wording candidates see.
+
+    The result is computed once at publish time and stored on the
+    ``ai_consent_versions`` document; ``scope_for()`` remains a fallback for
+    historical records that predate the stored scope.
+    """
+    import re
+    scope = ["interview_confirmation", "missed_interview_followup"]
+    if re.search(r"booking\s+confirmation", (text or ""), re.IGNORECASE):
+        scope = ["booking_confirmation"] + scope
+    return scope
+
+
 def scope_for(version) -> list:
     """Earlier legacy wording never covered the missed-interview follow-up; it is not
     silently upgraded. Newly admin-published versions (not in the legacy map) grant
-    the default published scope defined above."""
+    the default published scope defined above — this is a FALLBACK ONLY, used when
+    a candidate's stored ``consent_scope`` is missing. New publishes stamp their
+    own scope (see ``derive_published_scope``) on both the version document and
+    every consent record created against it."""
     v = version or ""
     if v in CONSENT_SCOPES:
         return list(CONSENT_SCOPES[v])

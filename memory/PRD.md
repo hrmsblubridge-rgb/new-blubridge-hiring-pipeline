@@ -29,6 +29,74 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - `BatchPanel.jsx` — batch rows now show "scenario: …" (`data-testid=batch-row-<id>-purpose`).
 - `/app/memory/test_credentials.md` corrected (password is `QAZwsx##123`, not `Admin User`).
 
+### 2026-02-14 — Enhancement 2 consent-scope: Booking Confirmation gated by wording
+**Finding (before fix)**: The three calling purposes are declared in
+`ai_calling/purposes.py::PURPOSES = (interview_confirmation,
+missed_interview_followup, booking_confirmation)`, but
+`modes.DEFAULT_PUBLISHED_SCOPE` included only the two legacy workflows.
+Current result: Booking Confirmation calls are **correctly blocked** for every
+candidate who accepted the admin-published wording — safety was intact and no
+retroactive upgrade occurred.
+**Fix (scope-at-publish, text-bound)**:
+- `backend/ai_calling/modes.py` — new `derive_published_scope(text)` function:
+  `interview_confirmation` + `missed_interview_followup` are always granted,
+  `booking_confirmation` is added only if the phrase "booking confirmation"
+  appears in the published text (case-insensitive). `scope_for()` downgraded
+  to a fallback used only for legacy records whose `consent_scope` field is
+  missing.
+- `backend/ai_calling/admin_auth.py::publish_version` — now calls
+  `derive_published_scope(draft["text"])` and stores `scope` on both the
+  `ai_consent_versions` document and the `ai_call_audit` row; response body
+  returns the computed scope.
+- `backend/ai_calling/consent.py::get_published_consent()` — returns the
+  scope stored on the version document (or derived from text for pre-fix
+  rows). `record_consent()` now accepts a `scope` argument so candidate
+  consents are stamped with the EXACT scope the published version grants;
+  history rows carry it too. `booking_decision` and `manage_grant` pass
+  `pub["scope"]` so the stored consent is bound to the exact version the
+  candidate saw.
+- `backend/scripts/stage_consent_draft_3workflows.py` — one-off script that
+  writes the approved 3-workflow wording to `ai_consent_drafts._id=current`.
+  Refuses to run against `hr_analytics`. Never touches `ai_consent_versions`
+  and does NOT publish — admin publishes manually via the Settings editor.
+**Approved wording** (staged as draft only — not published):
+  Title: `Optional AI Voice Call Consent — Interview & Booking Updates`
+  (full text in `scripts/stage_consent_draft_3workflows.py`). Describes all
+  three calls explicitly (Booking Confirmation, Pre-Interview Confirmation,
+  Missed-Interview Follow-up) plus the existing recording, withdrawal and
+  optional-checkbox clauses.
+**Tests (all green)**:
+- `tests/test_consent_scope_booking.py` — 13 pure-function tests:
+  the 9 original scope-coverage tests plus 4 for the new
+  `derive_published_scope()` (grants BOOKING only when wording contains the
+  phrase, case & whitespace-tolerant, rejects unrelated "booking" mentions,
+  handles None/empty).
+- `tests/test_consent_publish_sync.py` — 8 scratch-DB integration tests
+  (unchanged, still green).
+- `tests/test_consent_scope_at_publish.py` — 5 new scratch-DB integration
+  tests covering: scope stored on version doc is surfaced; legacy no-scope
+  doc derives from text; 2-workflow publish blocks BOOKING on the candidate
+  consent; 3-workflow publish grants BOOKING; older consent is never
+  retroactively upgraded after a new publish.
+- **Combined 26/26 focused tests PASS** (`PYTHONPATH=/app/backend
+  python -m pytest tests/test_consent_scope_booking.py
+  tests/test_consent_publish_sync.py tests/test_consent_scope_at_publish.py`).
+
+**Draft staging**: `scripts/stage_consent_draft_3workflows.py` contains the
+exact approved wording and is ready to run. It was intentionally NOT
+executed — the pod's `backend/.env` is pointed at `DB_NAME="hr_analytics"`
+and the task forbids production writes. The script hard-refuses to run
+against `hr_analytics` even if invoked. To stage: either point a non-prod
+pod at `hiring_ai_testing` and run the script, or paste the wording from
+the script header into Admin → AI Calling Settings → Candidate AI Voice
+Call Consent → Draft title/wording.
+
+**Safety invariants preserved**: `hiring_ai_testing` only, Bolna / AiSensy /
+Resend remain MOCKED, Emergency Stop ON, AI_CALLING_ENABLED unchanged, no
+calling-safety control released, no production deployment, no call
+dispatched. Previously accepted consents keep their stored `consent_scope`
+and `consent_text_version` — never retroactively upgraded.
+
 ### 2026-02-14 — P0 published AI consent now reaches candidate booking page
 **Root cause**: `GET /api/ai-calling/public/consent-text` returned the hardcoded
 `CONSENT_TITLE / CONSENT_TEXT / CONSENT_TEXT_VERSION` from `ai_calling/modes.py`

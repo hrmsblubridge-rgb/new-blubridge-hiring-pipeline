@@ -213,7 +213,12 @@ async def list_versions(request: Request):
 
 @admin_auth_router.post("/consent/publish")
 async def publish_version(body: ConsentPublishBody, request: Request):
-    """Only the designated top-level admin may publish. Published versions are immutable."""
+    """Only the designated top-level admin may publish. Published versions are immutable.
+
+    At publish time the scope (which calling purposes the wording authorizes) is
+    derived from the text and stored on the version document. This binds the
+    purpose set to the EXACT wording candidates see, so adding a new purpose
+    always requires a wording change — it cannot happen silently."""
     user = await _auth(request)
     _csrf(request)
     if not _can_publish_consent(user):
@@ -224,16 +229,19 @@ async def publish_version(body: ConsentPublishBody, request: Request):
     if not draft or not draft.get("text"):
         raise HTTPException(400, "No draft to publish")
     _validate_text(draft["title"], draft["text"])
+    from .modes import derive_published_scope
+    scope = derive_published_scope(draft["text"])
     ts = now_iso()
     # include microseconds to avoid collisions when two publishes happen inside the same second
     version_id = f"consent-{ts[:10]}-{int(datetime.now(timezone.utc).timestamp() * 1_000_000)}"
     doc = {"version_id": version_id, "title": draft["title"], "text": draft["text"],
+           "scope": scope,
            "published_by": user, "published_at": ts,
            "note": "immutable; existing candidate consents retain the version they originally accepted"}
     await db().ai_consent_versions.insert_one(doc)
     await db().ai_call_audit.insert_one({"action": "consent_version_published", "by": user, "at": ts,
-                                         "version_id": version_id, "title": doc["title"]})
-    return {"published": True, "version_id": version_id}
+                                         "version_id": version_id, "title": doc["title"], "scope": scope})
+    return {"published": True, "version_id": version_id, "scope": scope}
 
 
 # ---------------- Capacity summary & Preview scenarios ----------------
