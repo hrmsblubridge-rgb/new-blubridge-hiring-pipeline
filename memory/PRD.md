@@ -42,6 +42,16 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - 112 sort indicators present (`[data-testid^="ts-sort-"]`).
 - Admin Import Review: Select-All checkbox (`ts-unnamed-select-all`) + 2 per-row delete buttons (`ts-unnamed-delete-<id>`) visible.
 - 183 total employees still displayed; 2 unnamed pending review still captured — no data mutated.
+- iter158 chip regression fixed: typing `kath`, picking Kathirvel S → badge updates to `1 / 183 employees`, table narrows to 1 row, chip renders with readable cyan-700 bg + white text, suggestions dropdown closes on pick so Apply is reachable.
+
+**iter160 QA follow-up fixes (post-regression sweep)**
+- `fetchAll` now reads `selectedRef.current` and appends `employee_ids=<csv>` so chip selections actually filter (iter158 regression). A monotonic `requestIdRef` guards against stale responses from an in-flight fetch overwriting a newer one.
+- `handleReset` primes `filtersRef` + `selectedRef` BEFORE calling `fetchAll` (not via `setTimeout`), eliminating the stale-filter race.
+- `toggleEmployee` now also clears the search input + suggestions + closes the dropdown so admins can pick sequentially without blocking the Apply button.
+- Chip style: `bg-cyan-700 text-white border-cyan-800` (readable in both light + dark themes).
+- Outside-click handler scoped to a new `searchBarRef` wrapping ONLY the search row (not the filter row), so clicking Apply closes the dropdown.
+- Excel serial dates (e.g. `46241`) now render as `DD-MM-YYYY` and sort chronologically via a new `fmtDateCell` / `parseDateForSort` branch that converts serials against the Excel epoch (1899-12-30).
+- Duplicate `data-testid='ts-filter-team'` on the FilterField wrapper renamed to `'ts-filter-team-wrap'`.
 
 ## CHANGELOG
 ### 2026-02-14 — iter66 polish

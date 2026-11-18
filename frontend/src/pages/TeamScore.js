@@ -675,13 +675,15 @@ export default function TeamScore() {
                             <div className="flex flex-wrap items-center gap-1.5 bg-zinc-900 border border-zinc-700 focus-within:border-cyan-600 px-2 py-1.5 min-h-[42px]" data-testid="ts-search-wrap">
                                 {selected.map(s => (
                                     <span key={s.id} data-testid={`ts-chip-${s.id}`}
+                                        style={{ color: '#ffffff' }}
                                         className="inline-flex items-center gap-1.5 bg-cyan-700 border border-cyan-800 text-white text-xs pl-2 pr-1 py-0.5 shadow-sm">
-                                        <span className="font-medium">{s.name}</span>
+                                        <span className="font-medium text-white" style={{ color: '#ffffff' }}>{s.name}</span>
                                         <span className={`text-[10px] px-1 ${s.employee_status === 'active' ? 'text-emerald-200' : 'text-red-200'}`}>
                                             {s.employee_status === 'active' ? '●' : '○'}
                                         </span>
                                         <button onClick={() => removeSelected(s.id)} title={`Remove ${s.name}`}
                                             data-testid={`ts-chip-remove-${s.id}`}
+                                            style={{ color: '#ffffff' }}
                                             className="p-0.5 hover:bg-cyan-800 rounded text-white">
                                             <X size={12} />
                                         </button>

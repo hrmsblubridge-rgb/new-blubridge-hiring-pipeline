@@ -1,0 +1,34 @@
+{
+  "summary": "iter160 follow-up retest of the action items from iteration_67 (frontend, plus a backend regression run). Every functional fix is confirmed. (1) Chips filter the table: picking Kathirvel S sends employee_ids=<id> and the badge shows 1 / 183 with 1 row. Adding Kathiravan sends both ids as a CSV and the badge shows 2 / 183 with both rows visible. Removing a chip with × gives 1 / 183, and Clear all gives 183 / 183. (2) The suggestions dropdown closes after a pick (count 0), and Apply clicks with no interception. (3) Reset: with 2 chips, chips clear immediately and the badge settles at 183 / 183. With the Status filter (46 / 183), Reset gives 183 / 183 and the select is cleared. There is no transient 1 / 183. The old 2 / 183 badge stays visible for about 2.2s while the reset fetch is in flight (latency, not a race). (4) Surya J's Excel serial date renders as 07-08-2026. Joining Date ascending puts that row at 139/183, between 05-08-2026 and 24-08-2026. Asc and desc are both chronological, and no raw 5-digit values remain. (5) [data-testid=ts-filter-team] has count 1 (a SELECT), and -wrap has count 1. Core scope is unbroken: 115 th, H header 'H EMAIL / TEAMS ID' with a merged tooltip, I and J hidden, K LinkedIn with 17 View Profile links. The asc → desc → unsorted cycle works. Name sort is correct across all 183 rows on 4 pages. Every schema th has cursor:pointer except bulk and actions. Admin Import Review was tested with mocked /unnamed (2 TEST rows; the real DB has 0): per-row checkbox, indeterminate Select-All, amber bar '2 review rows selected · Delete Selected · Clear Selection', bulk modal and Cancel, single-delete modal and Cancel all work. Employee bulk (3 selected) and review selection stay isolated, and Clear on one does not affect the other. The employee bulk delete modal opens. The Add New Team Round modal opens and closes. Pytest: iter156–iter160 suites pass 28/28. No mutations were sent (all non-login POST/PUT/DELETE requests were route-guarded; 0 attempted).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Search chip text colour", "issue": "The chip is readable now, but the text is NOT white as the main agent stated. The computed chip bg is rgb(14,116,144) and the computed text is rgb(26,35,50): the light-theme override remaps text-white to dark navy. The contrast ratio is about 2.95:1, below WCAG AA 4.5:1 for 12px text. Fix: add a theme-proof class or an inline style (color:#fff), or exempt the chip from the light-theme text-white override.", "selector": "[data-testid^='ts-chip-']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin Import Review panel (light theme)", "issues": ["Still unchanged from iteration_67: the bulk bar text 'N review rows selected' and the table header (amber) have very low contrast on the brown/cream background."]},
+      {"screen": "Team Score filters", "issues": ["After Reset or a chip change, the old count and rows stay visible for about 2s with no loading cue on the badge or table. Consider showing a spinner or dimming during loading."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter160_team_score_review_and_sorting.py", "/app/test_reports/pytest/iter160_retest.xml"],
+  "action_items": [
+    "Optional (LOW): force white chip text in the light theme (the current computed colour is rgb(26,35,50) on cyan-700, about 2.95:1 contrast).",
+    "Optional (LOW): improve contrast in the Admin Import Review amber bar and header.",
+    "Optional: add a loading indicator to the count badge or table during fetchAll."
+  ],
+  "critical_code_review_comments": [
+    "TeamScore.js is now 1615 lines. Split it into the search/filter bar, the table plus sort helpers, AdminImportReview, and the modals.",
+    "Reset fires fetchAll twice: once in handleReset and again from the [selected] effect, because setSelected([]) creates a new array reference. On mount it is also called twice (the mount effect plus the [selected] effect). requestIdRef makes this safe, but it is redundant network load (5 GETs each time). Gate the [selected] effect behind a 'skip first run' or 'changed' check.",
+    "fetchAll refetches rounds, filters, unnamed and schema on every chip toggle. Only /employees depends on the chips, so split the fetch.",
+    "parseDateForSort uses local-time new Date(y,m,d) for ISO/DMY dates but Date.UTC for Excel serials. On the same calendar day the two differ by the timezone offset. This is harmless for ordering across days, but same-day ties could mis-order. Use Date.UTC consistently.",
+    "The conflict badge path (H≠I) could not be verified live (0 conflicts in the DB). Only code review remains."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (28/28 pytest)", "frontend": "100% functional (all 9 requested checks pass); 1 LOW chip-contrast deviation"},
+  "seed_data_creation": "None. Admin Import Review was exercised with 2 client-side mocked TEST_ rows via page.route fulfil of GET /api/team-score/unnamed. All non-login mutations were guarded (0 attempted).",
+  "test_credentials": "Admin User / QAZwsx##123 works. Note: /app/memory/test_credentials.md lists password 'Admin User', which is outdated. Update that file.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Real DB state: 183 employees, 0 unnamed rows. Mock /api/team-score/unnamed to test the review UI. Testids: ts-search-input, ts-search-suggest-<id>, ts-chip-<id>, ts-chip-remove-<id>, ts-chip-clear-all, ts-count-badge, select[data-testid=ts-filter-status|team|email|role|nirf], ts-filter-apply/reset, ts-th-c00X (c003=Name, c004=Joining Date, c007=Email/Teams ID), ts-page-size/next/first, ts-bulk-cb-<id>, ts-unnamed-toggle/cb-<id>/select-all/bulk-bar/delete-<id>, ts-add-round, ts-rounds-modal (Escape closes it)."
+}
