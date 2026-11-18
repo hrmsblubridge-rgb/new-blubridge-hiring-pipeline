@@ -31,7 +31,7 @@ const BASE_COLS = [
 
 // iter158 — Compact labelled field used in the redesigned filter row.
 const FilterField = ({ label, testid, children }) => (
-    <div className="flex flex-col gap-1 min-w-[140px] flex-1" data-testid={testid}>
+    <div className="flex flex-col gap-1 min-w-[140px] flex-1" data-testid={`${testid}-wrap`}>
         <label className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">{label}</label>
         {children}
     </div>
@@ -63,6 +63,7 @@ export default function TeamScore() {
     const [highlightIdx, setHighlightIdx] = useState(-1);
     const suggestTimerRef = useRef();
     const searchBoxRef = useRef();
+    const searchBarRef = useRef();  // iter160 — narrow scope: just the input + dropdown
     const [showRoundsModal, setShowRoundsModal] = useState(false);
     const [showEmpModal, setShowEmpModal] = useState(false);
     const [editingEmp, setEditingEmp] = useState(null);   // iter138 — edit-mode employee
@@ -99,17 +100,31 @@ export default function TeamScore() {
         setPage(target);
     };
 
+    // iter160 — Keep a ref to the selected chips so fetchAll (stable identity)
+    // can read the latest list and append `employee_ids` to the query. Without
+    // this the multi-select chips never reach the backend and the table was
+    // stuck at the full roster (iter158 regression surfaced by iter160 QA).
+    const selectedRef = useRef([]);
+    // iter160 — Monotonic request id so a late /employees response from an
+    // older click can never overwrite a newer one (fetchAll race condition).
+    const requestIdRef = useRef(0);
+
     const fetchAll = useCallback(async () => {
-        // Read the latest filters via the ref so this callback can stay
-        // dependency-free (and thus reference-stable). That lets the
-        // mount-only useEffect below list `fetchAll` as a dependency
-        // without triggering a refetch every time filters change — the
-        // explicit Filter / Reset buttons drive subsequent reloads.
+        // Read the latest filters + selected chips via refs so this callback
+        // stays reference-stable. That lets the mount-only useEffect below
+        // list `fetchAll` as a dependency without triggering a refetch every
+        // time filters change — the explicit Filter / Reset buttons drive
+        // subsequent reloads.
         const currentFilters = filtersRef.current;
+        const currentSelected = selectedRef.current || [];
+        const myReqId = ++requestIdRef.current;
         setLoading(true);
         try {
             const q = new URLSearchParams();
             Object.entries(currentFilters).forEach(([k, v]) => { if (v) q.append(k, v); });
+            if (currentSelected.length) {
+                q.append('employee_ids', currentSelected.map(s => s.id).join(','));
+            }
             const [rR, rE, rF, rU, rS] = await Promise.all([
                 axios.get(`${TS}/rounds`, { withCredentials: true }),
                 axios.get(`${TS}/employees?${q.toString()}`, { withCredentials: true }),
@@ -117,6 +132,8 @@ export default function TeamScore() {
                 axios.get(`${TS}/unnamed`, { withCredentials: true }).catch(() => ({ data: { unnamed: [] } })),
                 axios.get(`${TS}/schema`, { withCredentials: true }).catch(() => ({ data: { column_schema: [] } })),
             ]);
+            // Drop stale responses — only the latest in-flight request may commit.
+            if (myReqId !== requestIdRef.current) return;
             setRounds(rR.data.rounds || []);
             setEmployees(rE.data.employees || []);
             setCounts({ filtered: rE.data.filtered_count ?? (rE.data.employees || []).length, total: rE.data.total_count ?? 0 });
@@ -124,13 +141,20 @@ export default function TeamScore() {
             setUnnamedRows(rU.data?.unnamed || []);
             setColumnSchema(rS.data?.column_schema || []);
             setPage(1);  // iter136 — reset to first page on any reload
-        } catch (e) { toast.error(e.response?.data?.detail || 'Failed to load'); }
-        setLoading(false);
+        } catch (e) {
+            if (myReqId === requestIdRef.current) {
+                toast.error(e.response?.data?.detail || 'Failed to load');
+            }
+        }
+        if (myReqId === requestIdRef.current) setLoading(false);
     }, []);
 
     // Keep a live ref so `fetchAll` (stable) can read the latest filters.
     const filtersRef = useRef(filters);
     useEffect(() => { filtersRef.current = filters; }, [filters]);
+    // iter160 — Same pattern for the chip selection so the next fetch picks
+    // it up without `fetchAll` becoming reference-unstable.
+    useEffect(() => { selectedRef.current = selected; }, [selected]);
 
     // Mount-only initial load. `fetchAll` is reference-stable, so this
     // satisfies react-hooks/exhaustive-deps without re-running.
@@ -138,14 +162,30 @@ export default function TeamScore() {
 
     const handleFilter = () => fetchAll();
     const handleReset = () => {
-        setFilters({ employee_status: '', team: '', name: '', email: '', role: '', nirf_rank: '' });
+        const cleared = { employee_status: '', team: '', name: '', email: '', role: '', nirf_rank: '' };
+        setFilters(cleared);
         setSearch('');
         setSuggestions([]);
         setSuggestOpen(false);
         setSelected([]);
         setHighlightIdx(-1);
-        setTimeout(fetchAll, 0);
+        // Prime the refs IMMEDIATELY — don't wait for the useEffect flush so the
+        // triggered fetch sees the cleared state (iter160 QA race fix).
+        filtersRef.current = cleared;
+        selectedRef.current = [];
+        fetchAll();
     };
+
+    // iter160 — Trigger a refetch whenever the chip selection changes so the
+    // multi-select chips actually filter the table (iter158 regression). The
+    // ref update in the useEffect above runs first, so fetchAll reads the new
+    // list immediately.
+    useEffect(() => {
+        if (sortState.key) setPage(1);  // keep the row-number header in sync
+        selectedRef.current = selected;
+        fetchAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selected]);
 
     // iter156/158 — Autocomplete query (debounced 200 ms).
     const onSearchChange = (v) => {
@@ -166,12 +206,17 @@ export default function TeamScore() {
 
     // iter158 — Multi-select: toggle an employee into/out of the selected
     // chip set. Keeps the search keyword intact so the user can continue
-    // searching for additional employees.
+    // searching for additional employees. iter160 — also close the suggestions
+    // dropdown after a pick so the list doesn't cover the Apply button.
     const toggleEmployee = (s) => {
         setSelected(prev => {
             if (prev.find(p => p.id === s.id)) return prev.filter(p => p.id !== s.id);
             return [...prev, s];
         });
+        setSuggestOpen(false);
+        setHighlightIdx(-1);
+        setSearch('');
+        setSuggestions([]);
     };
     const removeSelected = (id) => setSelected(prev => prev.filter(p => p.id !== id));
     const clearAllSelected = () => setSelected([]);
@@ -186,15 +231,14 @@ export default function TeamScore() {
 
     const selectedIds = useMemo(() => new Set(selected.map(s => s.id)), [selected]);
 
-    // iter159 — Close suggestions on any mousedown outside the search card.
-    // Previous `onBlur` with a 180 ms timeout left the `z-40` dropdown
-    // intercepting clicks on the Add New Team Round / Add Employee buttons
-    // sitting below (and on the toolbar during the fade-out). This closes
-    // the dropdown synchronously before the click resolves on the real target.
+    // iter159 — Close suggestions on any mousedown outside the search bar.
+    // iter160 — searchBarRef narrowly wraps the chips + input + suggestion
+    // dropdown only (NOT the filter row), so clicking the Apply button
+    // (which sits inside the outer card) correctly closes the dropdown.
     useEffect(() => {
         const onDocMouseDown = (ev) => {
-            if (!searchBoxRef.current) return;
-            if (!searchBoxRef.current.contains(ev.target)) {
+            if (!searchBarRef.current) return;
+            if (!searchBarRef.current.contains(ev.target)) {
                 setSuggestOpen(false);
             }
         };
@@ -370,6 +414,20 @@ export default function TeamScore() {
         if (iso) return `${iso[3].padStart(2, '0')}-${iso[2].padStart(2, '0')}-${iso[1]}`;
         const dmy = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/.exec(s);
         if (dmy) return `${dmy[1].padStart(2, '0')}-${dmy[2].padStart(2, '0')}-${dmy[3]}`;
+        // iter160 — Handle Excel-serial dates (openpyxl surfaces an un-typed
+        // numeric cell for date-like values that weren't formatted as dates).
+        // Excel's epoch is 1899-12-30 (Lotus 1-2-3 compatibility). Values
+        // outside a sensible 1950–2200 range are treated as plain numbers.
+        if (/^\d{4,6}$/.test(s)) {
+            const n = Number(s);
+            if (n >= 18264 && n <= 109573) {  // 1950-01-01 … 2199-12-31
+                const dt = new Date(Date.UTC(1899, 11, 30) + n * 86400000);
+                const dd = String(dt.getUTCDate()).padStart(2, '0');
+                const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+                const yyyy = dt.getUTCFullYear();
+                return `${dd}-${mm}-${yyyy}`;
+            }
+        }
         return s;
     };
     const isDateHeader = (h) => /\bdate\b/i.test(String(h || '')) || /doj|dob/i.test(String(h || ''));
@@ -437,6 +495,13 @@ export default function TeamScore() {
         if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])).getTime();
         const dmy = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/.exec(s);
         if (dmy) return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1])).getTime();
+        // iter160 — Excel serial date (e.g. 46241 → 2026-08-07).
+        if (/^\d{4,6}$/.test(s)) {
+            const n = Number(s);
+            if (n >= 18264 && n <= 109573) {
+                return Date.UTC(1899, 11, 30) + n * 86400000;
+            }
+        }
         return null;
     };
     const rawByColFor = (emp) => {
@@ -593,7 +658,7 @@ export default function TeamScore() {
                     with chips at the top; other filters as a compact row below. */}
                 <div ref={searchBoxRef} className="bg-zinc-900 border border-zinc-800 p-4 space-y-3" data-testid="ts-search-filter-card">
                     {/* Row 1: search label + chips + input */}
-                    <div className="space-y-2">
+                    <div ref={searchBarRef} className="space-y-2">
                         <div className="flex items-center justify-between">
                             <label className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Search Employees by Name or Email</label>
                             <div className="flex items-center gap-3 text-xs text-zinc-500">
@@ -610,14 +675,14 @@ export default function TeamScore() {
                             <div className="flex flex-wrap items-center gap-1.5 bg-zinc-900 border border-zinc-700 focus-within:border-cyan-600 px-2 py-1.5 min-h-[42px]" data-testid="ts-search-wrap">
                                 {selected.map(s => (
                                     <span key={s.id} data-testid={`ts-chip-${s.id}`}
-                                        className="inline-flex items-center gap-1.5 bg-cyan-900/40 border border-cyan-700/60 text-cyan-100 text-xs pl-2 pr-1 py-0.5">
-                                        <span>{s.name}</span>
-                                        <span className={`text-[10px] px-1 ${s.employee_status === 'active' ? 'text-emerald-300' : 'text-red-300'}`}>
+                                        className="inline-flex items-center gap-1.5 bg-cyan-700 border border-cyan-800 text-white text-xs pl-2 pr-1 py-0.5 shadow-sm">
+                                        <span className="font-medium">{s.name}</span>
+                                        <span className={`text-[10px] px-1 ${s.employee_status === 'active' ? 'text-emerald-200' : 'text-red-200'}`}>
                                             {s.employee_status === 'active' ? '●' : '○'}
                                         </span>
                                         <button onClick={() => removeSelected(s.id)} title={`Remove ${s.name}`}
                                             data-testid={`ts-chip-remove-${s.id}`}
-                                            className="p-0.5 hover:bg-cyan-800/60 text-cyan-200">
+                                            className="p-0.5 hover:bg-cyan-800 rounded text-white">
                                             <X size={12} />
                                         </button>
                                     </span>

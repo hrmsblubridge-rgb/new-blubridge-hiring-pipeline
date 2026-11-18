@@ -19,6 +19,31 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - [x] Mock-only safety net preserved (`AI_CALLING_ENABLED=false`, Emergency Stop ON, `hiring_ai_testing` only)
 
 ## CHANGELOG
+### 2026-02-15 — Team Score iter160: Admin Import Review delete, email column merge, sortable headers with 2-line wrap + full-title tooltips
+
+**Backend (`backend/team_score.py`)**
+- New `DELETE /api/team-score/unnamed/{id}` — removes a single Admin Import Review row (`ts_employees_unnamed`). 404 for unknown ids.
+- New `POST /api/team-score/unnamed/bulk-delete` — mirrors the iter159 contract: `{ids: [<objectid hex>, …]}` → `{success, requested, deleted, missing}`. Malformed hex silently dropped; empty / missing / all-malformed → 400. Only `ts_employees_unnamed` is touched — `ts_employees`, `ts_rounds`, HRMS accounts and unrelated collections are untouched.
+
+**Frontend (`frontend/src/pages/TeamScore.js`) — Team Score page only**
+- **Admin Import Review delete**: new Select-All header checkbox + per-row checkboxes + Actions column with per-row red trash icon. Floating amber "N selected · Delete Selected · Clear Selection" toolbar appears when any row is ticked. Single-delete confirmation modal shows Source Row # / Team / Status / Role / Email / Notes. Bulk-delete modal warns the action is permanent. Panel auto-hides when count reaches 0; pending count updates immediately on delete.
+- **Email column consolidation (display-only, non-destructive)**: columns H "Email ID/ Teams" and I "Official Email/ Teams ID" are now merged into a single visible "Email / Teams ID" cell. Value selection: H if present else I, de-duped when identical. When BOTH are present and differ, we render H + a small amber `Conflict` badge whose tooltip reveals both (`Column H: … / Column I: …`) so the admin can resolve manually. Column I is hidden from the view; the schema still returns both entries at indexes 7 & 8, and `raw_columns` persists both values verbatim so export + re-import stays lossless.
+- **Table header redesign**: tiny Excel-letter label above a 2-line uppercase heading (via `-webkit-line-clamp: 2 + break-words`), `min-w-[110px] max-w-[220px]` per column so narrow headings get consistent width and long ones truncate instead of exploding into 4–5 lines. The ACTUAL original header (including merged-column provenance for H+I and J+K) is surfaced via a native `title` tooltip on every `<th>`.
+- **Per-column sorting**: every header except the bulk-checkbox / Actions column is now clickable; clicking cycles `asc → desc → unsorted` (shown by `CaretUp` / `CaretDown` / `CaretUpDown` from Phosphor). Sort is applied to the FULL `employees` array via a `useMemo` before pagination, so a sort reorders the dataset across all pages. Numeric detection uses `^-?\d+(\.\d+)?$` against the raw cell value so score columns sort numerically; date detection uses the existing `isDateHeader` and parses both ISO (`YYYY-MM-DD`) and DMY (`DD-MM-YYYY`/`DD/MM/YYYY`) into timestamps; everything else falls back to case-insensitive `localeCompare`. Missing values (`''`, `null`, `'-'`, `'–'`) are ALWAYS sorted to the end regardless of direction. Row-selection and chip filters are preserved across sort changes because selection is keyed by employee `_id`.
+- **Preserved** (no regression): iter159 employee bulk-delete, iter159 LinkedIn Profile merge (J hidden, K rendered as `LinkedinLogo + View Profile`), DD-MM-YYYY date formatting, Add New Team Round modal mount, 114-column Excel-order schema, Add New Employee flow, filters & multi-select chips, Reset, pagination, import/export, Excel column mappings.
+
+**Tests — 28/28 green**
+- `tests/test_iter160_team_score_review_and_sorting.py` (10 new): list returns both captured rows with preserved `raw_columns`; single delete 200 + 404; bulk-delete removes only listed ids; partial success reports `missing`; empty / missing / non-list / all-malformed rejected with 400; both email columns (H + I) remain intact in `raw_columns` + canonical fields after import; schema still exposes both email columns at indexes 7 & 8 with letters H & I; employee bulk-delete leaves the Admin Import Review untouched; unnamed bulk-delete leaves `ts_employees` + `ts_rounds` untouched.
+- All iter156–iter159 regression suites still green (6 + 4 + 4 + 4 = 18).
+
+**Preview verification (Admin User / QAZwsx##123)**
+- `/api/team-score/schema` returns 114 columns; H @ index 7 and I @ index 8 both present.
+- Team Score page renders: `ts-th-c007` → letter `H`, text `H\nEMAIL / TEAMS ID`, title `Excel column H + I — Email / Teams ID (merged: Email ID/ Teams + Official Email/ Teams ID)`. `ts-th-c008` is NOT rendered (column I hidden).
+- 112 sort indicators present (`[data-testid^="ts-sort-"]`).
+- Admin Import Review: Select-All checkbox (`ts-unnamed-select-all`) + 2 per-row delete buttons (`ts-unnamed-delete-<id>`) visible.
+- 183 total employees still displayed; 2 unnamed pending review still captured — no data mutated.
+
+## CHANGELOG
 ### 2026-02-14 — iter66 polish
 - `BatchBody.call_purpose` now `Optional[str] = None` so a missing scenario returns 400 (with the whitelist message) instead of Pydantic 422.
 - `ai_calling/purposes.py` — added `CONFIRM_REASON_MAP` + `_concise_reason(purpose, outcome)` so booking/confirmation outcomes like `CONFIRMED`, `RESCHEDULE_REQUESTED`, `DECLINED` get a concise label instead of an empty export cell.

@@ -1,0 +1,51 @@
+{
+  "summary": "iter160 Team Score regression (UI first). PASS: 112 visible schema columns plus bulk/Status/Actions (115 th); I and J hidden; H relabelled 'Email / Teams ID'; K shows 'LinkedIn Profile' (16 View Profile links, target=_blank); header tooltips carry the full Excel title; headers wrap to at most 2 lines with the letter label; sort cycle asc (cyan up), desc (cyan down), unsorted (grey) works and restores the default order; Name sort is correct across all 183 rows and all 4 pages; S.no sorts numerically; joining dates sort chronologically; employee bulk select (3) shows the bar and modal, then Cancel and Clear work; Add New Team Round modal opens and closes. The Admin Import Review delete UI was verified with MOCKED /unnamed data via Playwright route interception, with every mutation aborted: Select-All, per-row checkboxes, Actions trash icon, single-delete modal (Source Row/Team/Status/Role/Email/Notes), Cancel, the amber bar 'N review rows selected · Delete Selected · Clear Selection', the indeterminate state and the bulk modal with Cancel all work. FAIL: multi-select chips never filter the table (employee_ids is never sent); chip label text is invisible; a filter race condition. DATA NOTE: the real preview DB (hr_analytics) has 0 unnamed review rows, not 2. They were hard-deleted by a concurrent client (backend.out.log line 39176, POST /api/team-score/unnamed/bulk-delete 200) before my testing began. One round was also deleted by a concurrent client (log line 39236, DELETE /api/team-score/rounds/6afdbd236326e9c8bd67ffcb 200), so rounds went from 96 to 95. Neither came from this tester: all my browser sessions blocked or recorded mutations and recorded none, and my live pytest only hits unknown or malformed ids. Employees are still 183.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "tests/test_iter160_team_score_review_and_sorting.py (and the iter157-159 suites)", "issue": "Scratch DBs are never dropped. The local mongo holds 100+ leftover ts_*_pytest_scratch_* databases. Add a teardown that runs drop_database."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Search multi-select chips", "issue": "Selecting suggestions adds chips, but the table and badge stay at 183 / 183, even after Apply. fetchAll never appends employee_ids=<csv of selected ids> (only a comment refers to it). The backend supports it (employee_ids=<id> returns 1). This has been missing since iter158 (3a0b15a).", "selector": "[data-testid^='ts-chip-'], [data-testid='ts-count-badge']", "priority": "HIGH"},
+      {"component": "Search chips", "issue": "Chip label text is invisible: the computed color and background are both rgb(207,250,254), so the light-theme override maps the text and background to the same colour.", "selector": "[data-testid^='ts-chip-']", "priority": "HIGH"},
+      {"component": "Filters / fetchAll", "issue": "Race condition. On mount, GET /employees fires twice with no request-sequence guard, so a late stale response can overwrite filtered results. In 1 of 2 runs, Status=inactive + Apply sent the correct query but the badge showed 183 / 183. Reset uses setTimeout(fetchAll,0) while filtersRef is updated in a useEffect, so Reset can fetch with stale filters: once, the badge stayed at '1 / 183' after Reset. Fix: pass filters explicitly, or use an AbortController / request-id guard.", "selector": "[data-testid='ts-filter-apply'], [data-testid='ts-filter-reset']", "priority": "MEDIUM"},
+      {"component": "Search suggestions dropdown", "issue": "The dropdown stays open after you pick a suggestion and covers the filter row. The Apply button cannot be clicked because the li intercepts pointer events. The outside-click handler does not fire because Apply sits inside searchBoxRef. Only Escape closes it.", "selector": "[data-testid='ts-search-suggestions']", "priority": "MEDIUM"},
+      {"component": "Joining Date cell", "issue": "Surya J's joining date is stored as the Excel serial 46241. It renders as '46241' instead of DD-MM-YYYY (07-08-2026) and sorts as missing (last). fmtDateCell / parseDateForSort do not handle Excel serials.", "selector": "td[data-testid$='-c004']", "priority": "LOW"},
+      {"component": "Table empty/loading rows", "issue": "colSpan is columnSchema.length+2 (116), but 115 columns render because I and J are hidden. This is cosmetic.", "selector": "tbody td[colspan]", "priority": "LOW"},
+      {"component": "Filter testids", "issue": "data-testid='ts-filter-team' is duplicated on the FilterField wrapper div and on the select, so a strict locator resolves 2 elements. The other filters use '-wrap' on the wrapper.", "selector": "[data-testid='ts-filter-team']", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Multi-select chips → filtered table", "issue": "The frontend never sends employee_ids, so chips have no effect on the data (see ui_bugs).", "affected_selectors": ["[data-testid='ts-search-suggest-*']", "[data-testid='ts-count-badge']"]}
+    ],
+    "design_issues": [
+      {"screen": "Admin Import Review panel (light theme)", "issues": ["The table header (amber-300/70) is barely readable on the cream background.", "The bulk bar text 'N review rows selected' (amber on brown) has low contrast."]},
+      {"screen": "Global", "issues": ["The banner says 'LIVE MODE — messages are being sent to all recipients'. This conflicts with the requested mocked/test-only safety. Please confirm Test Mode is intended to be OFF in preview."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter160_live_nondestructive.py", "/app/backend/tests/test_iter160_team_score_review_and_sorting.py", "/app/test_reports/pytest/iter160.xml", "/app/test_reports/pytest/iter160_live.xml"],
+  "action_items": [
+    "Wire the selected chips into fetchAll: append employee_ids=selected.map(s=>s.id).join(','), and refetch when the chips change (or on Apply). Then verify the badge shows 'X / 183'.",
+    "Fix the chip text colour so it is readable in the light theme (the text colour currently equals the background).",
+    "Close the suggestions dropdown after a pick, or on any click outside the suggestion list itself (not the whole search card), so Apply is clickable.",
+    "Make fetchAll race-safe (request-id or AbortController) and make Reset fetch with explicit empty filters rather than relying on filtersRef plus setTimeout.",
+    "Handle Excel serial dates (e.g. 46241) in fmtDateCell / parseDateForSort.",
+    "Investigate who deleted the 2 Admin Import Review rows (log line 39176) and round 6afdbd236326e9c8bd67ffcb (log line 39236) in the preview DB during this window. Re-import the workbook if those rows and the round are needed.",
+    "Add drop_database teardown to the scratch-DB pytest suites."
+  ],
+  "critical_code_review_comments": [
+    "TeamScore.js is 1550 lines and should be split (header/table, AdminImportReview, modals, sort helpers).",
+    "getSortValue rebuilds the raw_columns map for every comparison (O(n log n × cols)). Precompute a map per employee once, keyed by sortState.",
+    "nameIdx is recomputed with findIndex inside every header and every row render loop. Memoize it.",
+    "Date detection relies on the header regex \\bdate\\b|doj|dob. Headers such as 'Dates' or 'DOJ.' work, but a 'Joined On' style header would not. Consider a schema type hint.",
+    "The conflict badge path (H≠I) was verified only by code review. The live DB has 0 conflicts, and my mock patch of /employees failed with a 401 from route.fetch."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter160_live_nondestructive.py (new, read-only/unknown-id live checks)"],
+  "success_rate": {"backend": "100% (10/10 scratch suite; 11/12 live non-destructive, where the single fail is the expected 2 unnamed rows: the real DB now has 0)", "frontend": "~80% (sorting, headers, merged email/LinkedIn, import-review UI (mocked), bulk delete, rounds modal and team/status filters work; chips filtering and chip visibility are broken; filter race)"},
+  "seed_data_creation": "None in the real DB. The Admin Import Review UI was tested with 2 client-side mocked rows (TEST_ ids aaaa…a1/a2) via Playwright route.fulfill. All POST/PUT/DELETE requests were aborted.",
+  "test_credentials": "Admin User / QAZwsx##123 works (login endpoint POST /api/login).",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The real data lives on Atlas in DB hr_analytics (not hiring_ai_testing). Current state: 183 employees, 0 unnamed rows, 95 rounds. To test the Admin Import Review UI without touching data, mock GET /api/team-score/unnamed with page.route and abort all mutations. Use select[data-testid=ts-filter-*] for filters (the team testid is duplicated). Press Escape after picking suggestions, or Apply is blocked. Column ids: c002=S.no, c003=Name, c004=Joining Date, c007=Email/Teams ID (merged)."
+}
