@@ -12,6 +12,10 @@ import ProgressDialog from '../components/ProgressDialog';
 const API = process.env.REACT_APP_BACKEND_URL;
 const TS = `${API}/api/team-score`;
 
+// iter157 — Default fallback column layout used ONLY when no import has
+// run yet. Once the admin imports the Consolidated workbook, the full
+// 114-column Excel-order schema from `/api/team-score/schema` takes over
+// and this array is no longer consulted.
 const BASE_COLS = [
     { key: 'name', label: 'Name' },
     { key: 'email', label: 'Email ID' },
@@ -34,6 +38,9 @@ export default function TeamScore() {
     const [counts, setCounts] = useState({ filtered: 0, total: 0 });
     const [unnamedRows, setUnnamedRows] = useState([]);
     const [showUnnamed, setShowUnnamed] = useState(false);
+    // iter157 — authoritative Excel-order schema fetched from the backend.
+    // When non-empty it overrides the legacy BASE_COLS + round-sort layout.
+    const [columnSchema, setColumnSchema] = useState([]);
     // Autocomplete state for the Search-by-Name/Email box.
     const [search, setSearch] = useState('');
     const [suggestions, setSuggestions] = useState([]);
@@ -82,17 +89,19 @@ export default function TeamScore() {
         try {
             const q = new URLSearchParams();
             Object.entries(currentFilters).forEach(([k, v]) => { if (v) q.append(k, v); });
-            const [rR, rE, rF, rU] = await Promise.all([
+            const [rR, rE, rF, rU, rS] = await Promise.all([
                 axios.get(`${TS}/rounds`, { withCredentials: true }),
                 axios.get(`${TS}/employees?${q.toString()}`, { withCredentials: true }),
                 axios.get(`${TS}/filters`, { withCredentials: true }),
                 axios.get(`${TS}/unnamed`, { withCredentials: true }).catch(() => ({ data: { unnamed: [] } })),
+                axios.get(`${TS}/schema`, { withCredentials: true }).catch(() => ({ data: { column_schema: [] } })),
             ]);
             setRounds(rR.data.rounds || []);
             setEmployees(rE.data.employees || []);
             setCounts({ filtered: rE.data.filtered_count ?? (rE.data.employees || []).length, total: rE.data.total_count ?? 0 });
             setFilterOpts(rF.data || {});
             setUnnamedRows(rU.data?.unnamed || []);
+            setColumnSchema(rS.data?.column_schema || []);
             setPage(1);  // iter136 — reset to first page on any reload
         } catch (e) { toast.error(e.response?.data?.detail || 'Failed to load'); }
         setLoading(false);
@@ -350,9 +359,95 @@ export default function TeamScore() {
                 </div>
 
                 {/* Table — iter136: sticky header (vertical) + sticky first 3
-                    columns (Status, Name, Email ID) horizontally. */}
+                    columns (Status, Name, Email ID) horizontally. iter157:
+                    when the authoritative Excel-order schema is present we
+                    render all 117-style columns from it; otherwise fall back
+                    to the legacy BASE_COLS + round-sort layout. */}
                 <div className="bg-zinc-900 border border-zinc-800 overflow-auto max-h-[calc(100vh-360px)]" data-testid="ts-table-wrap">
                     <table className="text-sm border-separate border-spacing-0">
+                        {columnSchema.length > 0 ? (
+                            <>
+                                <thead>
+                                    <tr className="text-xs uppercase tracking-wider text-zinc-500">
+                                        <th data-testid="ts-th-status" className="px-3 py-3 text-left whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 left-0 z-30 w-[64px] min-w-[64px]">Status</th>
+                                        {columnSchema.map((col) => {
+                                            const nameIdx = columnSchema.findIndex(c => (c.header || '').toLowerCase() === 'name');
+                                            const isNameCol = col.col === nameIdx;
+                                            const sticky = isNameCol
+                                                ? 'sticky top-0 left-[64px] z-30 w-[200px] min-w-[200px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]'
+                                                : 'sticky top-0 z-20';
+                                            return (
+                                                <th
+                                                    key={col.column_id}
+                                                    data-testid={`ts-th-${col.column_id}`}
+                                                    data-col-letter={col.letter}
+                                                    title={`Excel column ${col.letter} (position ${col.col + 1}) — ${col.header || '(blank header)'}`}
+                                                    className={`px-3 py-3 text-left whitespace-pre-line align-bottom bg-zinc-900 border-b border-zinc-800 ${sticky}`}>
+                                                    <div className="text-[10px] text-zinc-600 font-normal normal-case tracking-normal">{col.letter}</div>
+                                                    <div>{col.header || <span className="text-zinc-600">(blank)</span>}</div>
+                                                </th>
+                                            );
+                                        })}
+                                        <th data-testid="ts-th-actions" className="px-3 py-3 text-left whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 z-20">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {loading && <tr><td colSpan={columnSchema.length + 2} className="text-center py-6 text-zinc-500 bg-zinc-900">Loading...</td></tr>}
+                                    {!loading && employees.length === 0 && <tr><td colSpan={columnSchema.length + 2} className="text-center py-8 text-zinc-500 bg-zinc-900">No employees match the current filters.</td></tr>}
+                                    {!loading && pagedEmployees.map(e => {
+                                        const active = (e.employee_status || 'active') === 'active';
+                                        const rawByCol = {};
+                                        (e.raw_columns || []).forEach(rc => { rawByCol[rc.col] = rc.value; });
+                                        const nameIdx = columnSchema.findIndex(c => (c.header || '').toLowerCase() === 'name');
+                                        return (
+                                            <tr key={e.id} className="group" data-testid={`ts-row-${e.id}`}>
+                                                <td className="px-3 py-3 bg-zinc-900 group-hover:bg-zinc-800 border-b border-zinc-800/50 sticky left-0 z-10 w-[64px] min-w-[64px] transition-colors">
+                                                    <button onClick={() => setStatusModal({ emp: e })}
+                                                        data-testid={`ts-status-${e.id}`}
+                                                        title={active ? 'Active' : 'Inactive'}
+                                                        className={`p-1 transition-colors ${active ? 'text-emerald-400 hover:bg-emerald-900/30' : 'text-red-400 hover:bg-red-900/30'}`}>
+                                                        <Square size={16} weight="fill" />
+                                                    </button>
+                                                </td>
+                                                {columnSchema.map((col) => {
+                                                    const v = rawByCol[col.col];
+                                                    const display = (v === '' || v === null || v === undefined) ? '-' : String(v);
+                                                    const isNameCol = col.col === nameIdx;
+                                                    const sticky = isNameCol
+                                                        ? 'sticky left-[64px] z-10 w-[200px] min-w-[200px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]'
+                                                        : '';
+                                                    return (
+                                                        <td
+                                                            key={col.column_id}
+                                                            data-testid={`ts-${e.id}-${col.column_id}`}
+                                                            className={`px-3 py-3 whitespace-nowrap bg-zinc-900 group-hover:bg-zinc-800 border-b border-zinc-800/50 transition-colors ${sticky}`}>
+                                                            {display}
+                                                        </td>
+                                                    );
+                                                })}
+                                                <td className="px-3 py-3 whitespace-nowrap border-b border-zinc-800/50 group-hover:bg-zinc-800/30">
+                                                    <div className="flex items-center gap-2">
+                                                        <button onClick={() => { setEditingEmp(e); setShowEmpModal(true); }}
+                                                            data-testid={`ts-edit-${e.id}`}
+                                                            title="Edit employee"
+                                                            className="p-1.5 text-cyan-400 hover:bg-cyan-900/30 transition-colors">
+                                                            <PencilSimple size={16} />
+                                                        </button>
+                                                        <button onClick={() => setDeleteModal({ emp: e })}
+                                                            data-testid={`ts-delete-${e.id}`}
+                                                            title="Delete employee"
+                                                            className="p-1.5 text-red-400 hover:bg-red-900/30 transition-colors">
+                                                            <Trash size={16} />
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </>
+                        ) : (
+                            <>
                         <thead>
                             <tr className="text-xs uppercase tracking-wider text-zinc-500">
                                 <th data-testid="ts-th-status" className="px-3 py-3 text-left whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 left-0 z-30 w-[64px] min-w-[64px]">Status</th>
@@ -417,6 +512,8 @@ export default function TeamScore() {
                                 );
                             })}
                         </tbody>
+                            </>
+                        )}
                     </table>
                 </div>
 

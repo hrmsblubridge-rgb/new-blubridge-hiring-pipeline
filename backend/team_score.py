@@ -611,6 +611,18 @@ def _header_key(h: Any) -> str:
     return re.sub(r"\s+", " ", str(h or "").strip()).lower()
 
 
+def _excel_letter(col_index_1based: int) -> str:
+    """Convert a 1-based column index into the Excel letter (A, B, ..., Z,
+    AA, AB, ..., DJ, ...). We avoid pulling `openpyxl.utils.get_column_letter`
+    into this helper so the function stays usable from CSV import paths too."""
+    n = col_index_1based
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 def _find_header_row(rows: list) -> int:
     """Return the 0-based index of the row that contains the column headers.
 
@@ -734,6 +746,21 @@ async def import_team_scores(
     header_row_idx = _find_header_row(rows)
     headers = [str(h or "").strip() for h in rows[header_row_idx]]
     body = rows[header_row_idx + 1:]
+
+    # iter157 — Build the authoritative ordered column schema from row 2 of
+    # the uploaded workbook. Excel column A → index 0 → position 1 in the
+    # UI; Excel column DJ → index 113 → position 114. The frontend renders
+    # the Team Score table STRICTLY against this schema so the display
+    # order is guaranteed to match the Excel left-to-right sequence, even
+    # when two columns share the same heading.
+    column_schema = [
+        {"col": i,
+         "letter": _excel_letter(i + 1),
+         "header": headers[i],
+         "header_original": rows[header_row_idx][i],
+         "column_id": f"c{i:03d}"}  # stable per-position identifier
+        for i in range(len(headers))
+    ]
 
     # Column classification: base-field columns vs round-score columns.
     base_idx: dict = {}
@@ -873,6 +900,7 @@ async def import_team_scores(
         "header_row_index": header_row_idx,
         "headers": headers,
         "header_count": len(headers),
+        "column_schema": column_schema,
         "base_columns_mapped": base_idx,
         "round_columns": [h for _, h in round_idx],
         "duplicate_base_headers": base_dupes,
@@ -898,6 +926,32 @@ async def import_team_scores(
         return {"preview": True, **preview_payload}
 
     # Commit path -------------------------------------------------------------
+    # iter157 — Persist the authoritative Excel-order column schema so the
+    # /schema endpoint can serve the exact same ordered list across requests
+    # and after server restarts. The schema is keyed by `_id="current"`;
+    # the previous version is preserved under `_id="history"` for audit.
+    prev_schema = await _db.ts_column_schema.find_one({"_id": "current"})
+    if prev_schema:
+        await _db.ts_column_schema.update_one(
+            {"_id": "current"},
+            {"$set": {"column_schema": column_schema, "header_row_index": header_row_idx,
+                      "header_count": len(headers), "source_filename": file.filename,
+                      "updated_at": _now()}},
+        )
+        await _db.ts_column_schema.update_one(
+            {"_id": f"history_{_now()}"},
+            {"$set": {"column_schema": prev_schema.get("column_schema"),
+                      "superseded_at": _now()}},
+            upsert=True,
+        )
+    else:
+        await _db.ts_column_schema.insert_one(
+            {"_id": "current", "column_schema": column_schema,
+             "header_row_index": header_row_idx, "header_count": len(headers),
+             "source_filename": file.filename,
+             "created_at": _now(), "updated_at": _now()},
+        )
+
     # Build a single bulk_write across employees + rounds to keep remote Atlas
     # latency well under the 60s proxy ceiling. 183 rows × ~4 single-doc ops
     # was timing out; one `bulk_write` finishes in a couple of seconds.
@@ -989,6 +1043,28 @@ async def import_team_scores(
         "unnamed_rows_captured": len(unnamed_docs),
         "unnamed_rows_superseded": unnamed_superseded,
         "preview": preview_payload["counts"],
+    }
+
+
+@ts_router.get("/schema")
+async def get_column_schema(request: Request):
+    """Return the authoritative Excel-order column schema persisted by the
+    most recent `/import` commit. The frontend renders the Team Score table
+    STRICTLY against this ordered list — index 0 is Excel column A, index
+    len-1 is the last column in the uploaded workbook. Duplicated header
+    strings (e.g. "Score /10") stay as separate entries with unique
+    `column_id` values so UI order can never collapse them."""
+    await _require_auth(request)
+    doc = await _db.ts_column_schema.find_one({"_id": "current"})
+    if not doc:
+        return {"column_schema": [], "header_count": 0, "header_row_index": None,
+                "source_filename": None}
+    return {
+        "column_schema": doc.get("column_schema") or [],
+        "header_count": doc.get("header_count"),
+        "header_row_index": doc.get("header_row_index"),
+        "source_filename": doc.get("source_filename"),
+        "updated_at": doc.get("updated_at"),
     }
 
 

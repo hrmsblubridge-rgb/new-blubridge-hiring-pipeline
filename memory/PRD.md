@@ -29,6 +29,52 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - `BatchPanel.jsx` — batch rows now show "scenario: …" (`data-testid=batch-row-<id>-purpose`).
 - `/app/memory/test_credentials.md` corrected (password is `QAZwsx##123`, not `Admin User`).
 
+### 2026-02-14 — Team Score: strict Excel column-order preservation (iter157)
+**User requirement**: every column in the Team Score table must appear in
+EXACTLY the same left-to-right order as the uploaded workbook. Excel A → UI
+column 1, Excel DJ → UI column 114 (the uploaded file has 114 cols — A..DJ,
+not the 117 originally stated).
+
+**Code changes**:
+- `backend/team_score.py`
+  * `import_team_scores` builds an authoritative `column_schema` from row 2
+    of the uploaded sheet: `{col, letter, header, header_original,
+    column_id="cNNN"}` per column. Persisted to a new `ts_column_schema`
+    collection (`_id="current"`); the previous schema is archived under
+    `_id="history_<iso>"` for audit.
+  * New `GET /api/team-score/schema` returns the ordered schema; frontend
+    renders against it (no alphabetical / type-based sorting).
+  * Duplicate headers ("Score /10" × 5, "java" × 3 etc.) are preserved as
+    separate schema entries with distinct `column_id`s.
+  * Line-break and whitespace in the original heading survive via
+    `header_original`.
+- `frontend/src/pages/TeamScore.js`
+  * Fetches the schema alongside employees; when present, renders ALL
+    columns in Excel order, pulling cell values from `raw_columns` keyed
+    by original Excel index. Legacy BASE_COLS layout kept as a fallback
+    for pre-import state.
+  * Each column header shows the Excel letter (e.g. "A — Team",
+    "DJ — Score /10") above the header text; the Name column stays
+    horizontally sticky with the Status column.
+
+**Live-verified**:
+- `/api/team-score/schema` returns 114 columns, first 20 and last 5
+  match Excel A..T and DF..DJ exactly. Duplicated headers "Score /10"
+  (DF, DG, DI, DJ) stay as separate entries with unique `column_id`.
+- UI first 18 headers render verbatim in Excel order: Team / Employment
+  Status / S.no / Name / Joining Date / Relieving Date / Role / Email
+  ID/ Teams / Official Email/ Teams ID / LinkedIn ID / LinkedIn /
+  College / NIRF (2025 Engineering) / Degree / Passing Year / az /
+  Mensa(40) / BP(20). Kathirvel S row renders Team=Research Unit,
+  Name=Kathirvel S in c000/c003 cells.
+
+**Tests (all green)**:
+- `tests/test_iter157_team_score_column_schema.py` — 4 scratch-DB
+  integration tests: schema mirrors Excel order including duplicates,
+  schema re-publishes on reimport and archives previous, header line
+  breaks preserved, `/schema` empty before first import.
+- `tests/test_iter156_team_score_consolidated_import.py` — 6/6 still green.
+
 ### 2026-02-14 — Team Score: Consolidated Excel import (iter156)
 **Context**: The existing `/api/team-score/import` read row 1 as headers,
 only extracted 9 base fields and discarded every other data column — the
