@@ -508,7 +508,11 @@ async def _collect_export_rows(filter_q: dict):
     inactives = [e for e in emps if (e.get("employee_status") or "active").lower() == "inactive"]
     actives.sort(key=lambda e: (e.get("name") or "").lower())
     inactives.sort(key=lambda e: (e.get("name") or "").lower())
-    base_cols = ["Name", "Email ID", "LinkedIn ID", "Role", "Joining Date",
+    # iter161 — Team is the authoritative Column A in the source workbook
+    # and in the Team Score UI; the export was dropping it (hardcoded base_cols
+    # started at "Name"). Restoring it here brings the exported file back in
+    # line with the Excel template and preserves the value for every employee.
+    base_cols = ["Team", "Name", "Email ID", "LinkedIn ID", "Role", "Joining Date",
                  "College", "NIRF Rank", "Degree", "Passing Year"]
 
     def _fmt_total(ts):
@@ -554,6 +558,7 @@ async def _collect_export_rows(filter_q: dict):
     def emp_row(e):
         scores = e.get("round_scores") or {}
         row = [
+            e.get("team") or "",
             e.get("name") or "",
             e.get("email") or "",
             e.get("linkedin_id") or "",
