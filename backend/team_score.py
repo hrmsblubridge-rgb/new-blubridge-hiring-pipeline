@@ -302,6 +302,23 @@ def _build_filter_query(params: dict) -> dict:
     nirf = (params.get("nirf_rank") or "").strip()
     if nirf:
         q["nirf_rank"] = nirf
+    # iter158 — multi-select employee filter. `employee_ids` is a comma-separated
+    # list of `_id` hex strings; the resulting filter is an OR over the selected
+    # employees and AND over the remaining field filters (per the spec).
+    ids_csv = (params.get("employee_ids") or "").strip()
+    if ids_csv:
+        from bson import ObjectId
+        oids = []
+        for s in ids_csv.split(","):
+            s = s.strip()
+            if not s:
+                continue
+            try:
+                oids.append(ObjectId(s))
+            except Exception:  # noqa: BLE001 — ignore malformed IDs rather than 500
+                continue
+        if oids:
+            q["_id"] = {"$in": oids}
     return q
 
 
@@ -314,11 +331,13 @@ async def list_employees(
     email: Optional[str] = None,
     role: Optional[str] = None,
     nirf_rank: Optional[str] = None,
+    employee_ids: Optional[str] = None,
 ):
     await _require_auth(request)
     q = _build_filter_query({
         "employee_status": employee_status, "team": team,
         "name": name, "email": email, "role": role, "nirf_rank": nirf_rank,
+        "employee_ids": employee_ids,
     })
     rows = await _db.ts_employees.find(q).to_list(None)
     rows.sort(key=lambda r: (

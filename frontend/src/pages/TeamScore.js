@@ -28,24 +28,40 @@ const BASE_COLS = [
     { key: 'passing_year', label: 'Passing Year' },
 ];
 
+// iter158 — Compact labelled field used in the redesigned filter row.
+const FilterField = ({ label, testid, children }) => (
+    <div className="flex flex-col gap-1 min-w-[140px] flex-1" data-testid={testid}>
+        <label className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">{label}</label>
+        {children}
+    </div>
+);
+
 export default function TeamScore() {
     const navigate = useNavigate();
     const [rounds, setRounds] = useState([]);
     const [employees, setEmployees] = useState([]);
     const [filterOpts, setFilterOpts] = useState({});
+    // iter158 — `name` filter dropdown removed from the UI (duplicated the
+    // top search bar); we keep the field in state so legacy `/employees`
+    // query composition stays untouched but it is no longer user-settable.
     const [filters, setFilters] = useState({ employee_status: '', team: '', name: '', email: '', role: '', nirf_rank: '' });
     // iter156 — totals for filtered vs total badge and unnamed admin review.
     const [counts, setCounts] = useState({ filtered: 0, total: 0 });
     const [unnamedRows, setUnnamedRows] = useState([]);
     const [showUnnamed, setShowUnnamed] = useState(false);
     // iter157 — authoritative Excel-order schema fetched from the backend.
-    // When non-empty it overrides the legacy BASE_COLS + round-sort layout.
     const [columnSchema, setColumnSchema] = useState([]);
-    // Autocomplete state for the Search-by-Name/Email box.
+    // iter158 — multi-select employee state: `selected` is the array of
+    // confirmed-chip employees that drive the `employee_ids` filter;
+    // `search` is the uncommitted keyword in the input; never treat the
+    // typed keyword as a selected employee.
+    const [selected, setSelected] = useState([]);
     const [search, setSearch] = useState('');
     const [suggestions, setSuggestions] = useState([]);
     const [suggestOpen, setSuggestOpen] = useState(false);
+    const [highlightIdx, setHighlightIdx] = useState(-1);
     const suggestTimerRef = useRef();
+    const searchBoxRef = useRef();
     const [showRoundsModal, setShowRoundsModal] = useState(false);
     const [showEmpModal, setShowEmpModal] = useState(false);
     const [editingEmp, setEditingEmp] = useState(null);   // iter138 — edit-mode employee
@@ -121,34 +137,49 @@ export default function TeamScore() {
         setSearch('');
         setSuggestions([]);
         setSuggestOpen(false);
+        setSelected([]);
+        setHighlightIdx(-1);
         setTimeout(fetchAll, 0);
     };
 
-    // iter156 — Autocomplete query (debounced 200 ms).
+    // iter156/158 — Autocomplete query (debounced 200 ms).
     const onSearchChange = (v) => {
         setSearch(v);
         setSuggestOpen(true);
+        setHighlightIdx(-1);
         if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
         if (!v.trim()) { setSuggestions([]); return; }
         suggestTimerRef.current = setTimeout(async () => {
             try {
                 const r = await axios.get(`${TS}/suggest`, {
-                    params: { q: v, limit: 10 }, withCredentials: true,
+                    params: { q: v, limit: 20 }, withCredentials: true,
                 });
                 setSuggestions(r.data.suggestions || []);
             } catch (_err) { setSuggestions([]); }
         }, 200);
     };
 
-    const pickSuggestion = (s) => {
-        // Populate the Name filter with the exact selected name so the
-        // table collapses to that employee's row(s). The autocomplete
-        // search box stays filled for clarity.
-        setFilters(f => ({ ...f, name: s.name }));
-        setSearch(s.name);
-        setSuggestOpen(false);
-        setTimeout(fetchAll, 0);
+    // iter158 — Multi-select: toggle an employee into/out of the selected
+    // chip set. Keeps the search keyword intact so the user can continue
+    // searching for additional employees.
+    const toggleEmployee = (s) => {
+        setSelected(prev => {
+            if (prev.find(p => p.id === s.id)) return prev.filter(p => p.id !== s.id);
+            return [...prev, s];
+        });
     };
+    const removeSelected = (id) => setSelected(prev => prev.filter(p => p.id !== id));
+    const clearAllSelected = () => setSelected([]);
+
+    const onSearchKeyDown = (e) => {
+        if (!suggestOpen || suggestions.length === 0) return;
+        if (e.key === 'ArrowDown') { e.preventDefault(); setHighlightIdx(i => Math.min(i + 1, suggestions.length - 1)); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); setHighlightIdx(i => Math.max(i - 1, 0)); }
+        else if (e.key === 'Enter' && highlightIdx >= 0) { e.preventDefault(); toggleEmployee(suggestions[highlightIdx]); }
+        else if (e.key === 'Escape') { setSuggestOpen(false); }
+    };
+
+    const selectedIds = useMemo(() => new Set(selected.map(s => s.id)), [selected]);
 
     const handleExport = async (fmt) => {
         if (progress) return;
@@ -258,90 +289,146 @@ export default function TeamScore() {
                 <h1 className="text-2xl font-light">Team Score</h1>
             </div>
 
-            <div className="p-6 space-y-6">
-                {/* iter156 — Prominent Search-by-Name/Email with autocomplete.
-                    Matches partial names (case / whitespace tolerant), plus
-                    email ID. Each suggestion shows name, team and status. */}
-                <div className="relative" data-testid="ts-search-wrap">
-                    <label className="text-xs text-zinc-500 uppercase tracking-wider">Search Employee by Name or Email</label>
-                    <div className="relative mt-1">
-                        <input
-                            value={search}
-                            onChange={e => onSearchChange(e.target.value)}
-                            onFocus={() => { if (suggestions.length) setSuggestOpen(true); }}
-                            onBlur={() => setTimeout(() => setSuggestOpen(false), 150)}
-                            placeholder="Start typing — e.g. Kath …"
-                            data-testid="ts-search-input"
-                            className="w-full bg-zinc-900 border border-zinc-700 px-3 py-3 text-base focus:outline-none focus:border-cyan-600"
-                            autoComplete="off"
-                        />
-                        {suggestOpen && suggestions.length > 0 && (
-                            <ul
-                                data-testid="ts-search-suggestions"
-                                className="absolute z-40 top-full left-0 right-0 mt-1 max-h-72 overflow-y-auto bg-zinc-900 border border-zinc-700 shadow-xl">
-                                {suggestions.map(s => (
-                                    <li key={s.id}
-                                        onMouseDown={e => { e.preventDefault(); pickSuggestion(s); }}
-                                        data-testid={`ts-search-suggest-${s.id}`}
-                                        className="px-3 py-2 hover:bg-zinc-800 cursor-pointer border-b border-zinc-800 last:border-b-0">
-                                        <div className="flex items-center justify-between gap-3">
-                                            <div className="min-w-0">
-                                                <div className="text-sm text-white truncate">{s.name || '—'}</div>
-                                                <div className="text-xs text-zinc-500 truncate">
-                                                    {s.email || '(no email)'} · {s.team || '—'} · <span className={s.employee_status === 'active' ? 'text-emerald-400' : 'text-red-400'}>{s.employee_status}</span>
-                                                </div>
-                                            </div>
-                                            {s.role ? <span className="text-xs text-zinc-500 whitespace-nowrap">{s.role}</span> : null}
-                                        </div>
-                                    </li>
+            <div className="p-6 space-y-4">
+                {/* iter158 — Unified Search + Filters card. One card, clean
+                    spacing, no duplicated name dropdown. Employee multi-select
+                    with chips at the top; other filters as a compact row below. */}
+                <div ref={searchBoxRef} className="bg-zinc-900 border border-zinc-800 p-4 space-y-3" data-testid="ts-search-filter-card">
+                    {/* Row 1: search label + chips + input */}
+                    <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                            <label className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Search Employees by Name or Email</label>
+                            <div className="flex items-center gap-3 text-xs text-zinc-500">
+                                <span data-testid="ts-count-badge">
+                                    <span className="text-white font-medium">{counts.filtered}</span>
+                                    <span className="text-zinc-500"> / </span>
+                                    <span className="text-white font-medium">{counts.total}</span>
+                                    <span className="text-zinc-500"> employees</span>
+                                </span>
+                                {unnamedRows.length > 0 && <span className="text-amber-400">{unnamedRows.length} unnamed pending review</span>}
+                            </div>
+                        </div>
+                        <div className="relative">
+                            <div className="flex flex-wrap items-center gap-1.5 bg-zinc-900 border border-zinc-700 focus-within:border-cyan-600 px-2 py-1.5 min-h-[42px]" data-testid="ts-search-wrap">
+                                {selected.map(s => (
+                                    <span key={s.id} data-testid={`ts-chip-${s.id}`}
+                                        className="inline-flex items-center gap-1.5 bg-cyan-900/40 border border-cyan-700/60 text-cyan-100 text-xs pl-2 pr-1 py-0.5">
+                                        <span>{s.name}</span>
+                                        <span className={`text-[10px] px-1 ${s.employee_status === 'active' ? 'text-emerald-300' : 'text-red-300'}`}>
+                                            {s.employee_status === 'active' ? '●' : '○'}
+                                        </span>
+                                        <button onClick={() => removeSelected(s.id)} title={`Remove ${s.name}`}
+                                            data-testid={`ts-chip-remove-${s.id}`}
+                                            className="p-0.5 hover:bg-cyan-800/60 text-cyan-200">
+                                            <X size={12} />
+                                        </button>
+                                    </span>
                                 ))}
-                            </ul>
-                        )}
+                                <input
+                                    value={search}
+                                    onChange={e => onSearchChange(e.target.value)}
+                                    onFocus={() => { if (suggestions.length) setSuggestOpen(true); }}
+                                    onBlur={() => setTimeout(() => setSuggestOpen(false), 180)}
+                                    onKeyDown={onSearchKeyDown}
+                                    placeholder={selected.length ? 'Add another employee…' : 'Start typing — e.g. Kath …'}
+                                    data-testid="ts-search-input"
+                                    className="flex-1 min-w-[160px] bg-transparent px-1 py-1 text-sm focus:outline-none"
+                                    autoComplete="off"
+                                />
+                                {selected.length > 0 && (
+                                    <button onClick={clearAllSelected} data-testid="ts-chip-clear-all"
+                                        className="ml-auto text-[11px] text-zinc-400 hover:text-white underline-offset-2 hover:underline px-1">
+                                        Clear all
+                                    </button>
+                                )}
+                            </div>
+                            {suggestOpen && search.trim() !== '' && (
+                                <ul data-testid="ts-search-suggestions"
+                                    className="absolute z-40 top-full left-0 right-0 mt-1 max-h-72 overflow-y-auto bg-zinc-900 border border-zinc-700 shadow-xl">
+                                    {suggestions.length === 0 && (
+                                        <li className="px-3 py-3 text-sm text-zinc-500" data-testid="ts-search-empty">
+                                            No employees found for "{search}"
+                                        </li>
+                                    )}
+                                    {suggestions.map((s, idx) => {
+                                        const isSel = selectedIds.has(s.id);
+                                        const isHi = idx === highlightIdx;
+                                        return (
+                                            <li key={s.id}
+                                                onMouseDown={e => { e.preventDefault(); toggleEmployee(s); }}
+                                                onMouseEnter={() => setHighlightIdx(idx)}
+                                                data-testid={`ts-search-suggest-${s.id}`}
+                                                aria-selected={isSel}
+                                                className={`px-3 py-2 cursor-pointer border-b border-zinc-800 last:border-b-0 ${isHi ? 'bg-zinc-800' : isSel ? 'bg-cyan-950/40' : 'hover:bg-zinc-800'}`}>
+                                                <div className="flex items-center gap-3">
+                                                    <input type="checkbox" readOnly checked={isSel}
+                                                        className="pointer-events-none accent-cyan-600" />
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="text-sm text-white truncate">{s.name || '—'}</div>
+                                                        <div className="text-xs text-zinc-500 truncate">
+                                                            {s.email || '(no email)'} · {s.team || '—'} · <span className={s.employee_status === 'active' ? 'text-emerald-400' : 'text-red-400'}>{s.employee_status}</span>
+                                                        </div>
+                                                    </div>
+                                                    {s.role ? <span className="text-xs text-zinc-500 whitespace-nowrap">{s.role}</span> : null}
+                                                </div>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
+                        </div>
                     </div>
-                </div>
 
-                {/* Filters */}
-                <div className="bg-zinc-900 border border-zinc-800 p-4 grid grid-cols-1 md:grid-cols-7 gap-3" data-testid="ts-filters">
-                    <select value={filters.team} onChange={e => setFilters({ ...filters, team: e.target.value })}
-                        data-testid="ts-filter-team" className="bg-zinc-800 border border-zinc-700 px-2 py-2 text-sm">
-                        <option value="">Team (all)</option>
-                        {(filterOpts.team || []).map(v => <option key={v} value={v}>{v}</option>)}
-                    </select>
-                    <select value={filters.employee_status} onChange={e => setFilters({ ...filters, employee_status: e.target.value })}
-                        data-testid="ts-filter-status" className="bg-zinc-800 border border-zinc-700 px-2 py-2 text-sm">
-                        <option value="">Status (all)</option>
-                        {(filterOpts.employee_status || []).map(v => <option key={v} value={v}>{v}</option>)}
-                    </select>
-                    <select value={filters.name} onChange={e => setFilters({ ...filters, name: e.target.value })}
-                        data-testid="ts-filter-name" className="bg-zinc-800 border border-zinc-700 px-2 py-2 text-sm">
-                        <option value="">Name (all)</option>
-                        {(filterOpts.name || []).map(v => <option key={v} value={v}>{v}</option>)}
-                    </select>
-                    <select value={filters.email} onChange={e => setFilters({ ...filters, email: e.target.value })}
-                        data-testid="ts-filter-email" className="bg-zinc-800 border border-zinc-700 px-2 py-2 text-sm">
-                        <option value="">Email (all)</option>
-                        {(filterOpts.email || []).map(v => <option key={v} value={v}>{v}</option>)}
-                    </select>
-                    <select value={filters.role} onChange={e => setFilters({ ...filters, role: e.target.value })}
-                        data-testid="ts-filter-role" className="bg-zinc-800 border border-zinc-700 px-2 py-2 text-sm">
-                        <option value="">Role (all)</option>
-                        {(filterOpts.role || []).map(v => <option key={v} value={v}>{v}</option>)}
-                    </select>
-                    <select value={filters.nirf_rank} onChange={e => setFilters({ ...filters, nirf_rank: e.target.value })}
-                        data-testid="ts-filter-nirf" className="bg-zinc-800 border border-zinc-700 px-2 py-2 text-sm">
-                        <option value="">NIRF Rank (all)</option>
-                        {(filterOpts.nirf_rank || []).map(v => <option key={v} value={v}>{v}</option>)}
-                    </select>
-                    <div className="flex gap-2 flex-wrap">
-                        <button onClick={handleFilter} data-testid="ts-filter-apply" className="px-3 py-2 bg-cyan-700 hover:bg-cyan-600 text-sm flex items-center gap-1"><FunnelSimple size={14} />Filter</button>
-                        <button onClick={handleReset} data-testid="ts-filter-reset" className="px-3 py-2 bg-zinc-700 hover:bg-zinc-600 text-sm flex items-center gap-1"><ArrowsClockwise size={14} />Reset</button>
+                    {/* Row 2: Filter dropdowns + Filter/Reset buttons. Name
+                        dropdown intentionally omitted — top search bar is the
+                        single interface for employee selection. */}
+                    <div className="flex flex-wrap items-end gap-2 pt-1 border-t border-zinc-800/60" data-testid="ts-filters">
+                        <FilterField label="Team" testid="ts-filter-team">
+                            <select value={filters.team} onChange={e => setFilters({ ...filters, team: e.target.value })}
+                                data-testid="ts-filter-team" className="bg-zinc-900 border border-zinc-700 h-9 px-2 text-sm w-full focus:outline-none focus:border-cyan-600">
+                                <option value="">All</option>
+                                {(filterOpts.team || []).map(v => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                        </FilterField>
+                        <FilterField label="Status" testid="ts-filter-status-wrap">
+                            <select value={filters.employee_status} onChange={e => setFilters({ ...filters, employee_status: e.target.value })}
+                                data-testid="ts-filter-status" className="bg-zinc-900 border border-zinc-700 h-9 px-2 text-sm w-full focus:outline-none focus:border-cyan-600">
+                                <option value="">All</option>
+                                {(filterOpts.employee_status || []).map(v => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                        </FilterField>
+                        <FilterField label="Email" testid="ts-filter-email-wrap">
+                            <select value={filters.email} onChange={e => setFilters({ ...filters, email: e.target.value })}
+                                data-testid="ts-filter-email" className="bg-zinc-900 border border-zinc-700 h-9 px-2 text-sm w-full focus:outline-none focus:border-cyan-600">
+                                <option value="">All</option>
+                                {(filterOpts.email || []).map(v => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                        </FilterField>
+                        <FilterField label="Role" testid="ts-filter-role-wrap">
+                            <select value={filters.role} onChange={e => setFilters({ ...filters, role: e.target.value })}
+                                data-testid="ts-filter-role" className="bg-zinc-900 border border-zinc-700 h-9 px-2 text-sm w-full focus:outline-none focus:border-cyan-600">
+                                <option value="">All</option>
+                                {(filterOpts.role || []).map(v => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                        </FilterField>
+                        <FilterField label="NIRF Rank" testid="ts-filter-nirf-wrap">
+                            <select value={filters.nirf_rank} onChange={e => setFilters({ ...filters, nirf_rank: e.target.value })}
+                                data-testid="ts-filter-nirf" className="bg-zinc-900 border border-zinc-700 h-9 px-2 text-sm w-full focus:outline-none focus:border-cyan-600">
+                                <option value="">All</option>
+                                {(filterOpts.nirf_rank || []).map(v => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                        </FilterField>
+                        <div className="flex items-center gap-2 ml-auto">
+                            <button onClick={handleFilter} data-testid="ts-filter-apply"
+                                className="h-9 px-4 bg-cyan-700 hover:bg-cyan-600 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors">
+                                <FunnelSimple size={14} />Apply
+                            </button>
+                            <button onClick={handleReset} data-testid="ts-filter-reset"
+                                className="h-9 px-4 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-sm inline-flex items-center gap-1.5 transition-colors">
+                                <ArrowsClockwise size={14} />Reset
+                            </button>
+                        </div>
                     </div>
-                </div>
-
-                {/* iter156 — filtered count badge */}
-                <div className="text-xs text-zinc-400" data-testid="ts-count-badge">
-                    Showing <span className="text-white font-medium">{counts.filtered}</span> of <span className="text-white font-medium">{counts.total}</span> imported employees
-                    {unnamedRows.length > 0 && <span className="ml-3 text-amber-400">({unnamedRows.length} unnamed row{unnamedRows.length === 1 ? '' : 's'} pending admin review)</span>}
                 </div>
 
                 {/* Action bar */}

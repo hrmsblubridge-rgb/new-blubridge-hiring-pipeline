@@ -29,6 +29,40 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - `BatchPanel.jsx` — batch rows now show "scenario: …" (`data-testid=batch-row-<id>-purpose`).
 - `/app/memory/test_credentials.md` corrected (password is `QAZwsx##123`, not `Admin User`).
 
+### 2026-02-14 — Team Score: multi-select employee + search/filter redesign (iter158)
+**Scope** (UI-only + one backend filter param; no business-logic, DB schema,
+import/export, calculations, pagination or role-access changes):
+- Removed the duplicate Name dropdown from the filter row; the top search
+  bar is now the single interface for searching/selecting employees.
+- Search bar converted to a searchable multi-select: debounced autocomplete
+  (200 ms), checkbox per suggestion, chips for selected employees with a
+  per-chip `×` remove and a global "Clear all"; keyboard navigation
+  (↑/↓/Enter/Esc); "No employees found" message; selections persist across
+  keyword changes; chips use OR logic across selected IDs; other filters
+  AND with the chip set.
+- Compact one-card redesign: single bordered card with search on top and
+  filters as a 5-column flex row (Team / Status / Email / Role / NIRF
+  Rank), consistent 36-px heights, uppercase 10-px labels, Apply + Reset
+  buttons right-aligned, filtered-count badge inline.
+- Reset clears chips, search keyword, suggestions, highlights, all
+  dropdowns and re-fetches.
+- Backend: `GET /api/team-score/employees` now accepts
+  `employee_ids=<csv of ObjectId hex>` and ANDs it with the existing field
+  filters. Malformed IDs are dropped (never 500). Empty / missing value
+  returns the full filtered list unchanged.
+**Preserved**: table columns + Excel order, all 114-column schema,
+import/export, add new employee / round, calculations, role-based access,
+sorting/pagination, unnamed-row admin review, round modal, every existing
+data-testid for the table.
+**Tests** — `tests/test_iter158_team_score_multiselect.py` (4 new tests,
+green): employee_ids OR filter returns exactly the listed ids; ANDs with
+team + status; malformed ids dropped; empty value returns full list.
+Combined with iter157 (4) and iter156 (6) suites — 14/14 green.
+**Verified in preview**: typed "sanjay" → picked 2 → typed "kath" → 2 chips
+remained → dropdown showed Kathirvel S (active) + Kathiravan (inactive)
+with live checkboxes; count badge "183 / 183 employees · 2 unnamed
+pending review" rendered inline.
+
 ### 2026-02-14 — Team Score: strict Excel column-order preservation (iter157)
 **User requirement**: every column in the Team Score table must appear in
 EXACTLY the same left-to-right order as the uploaded workbook. Excel A → UI
