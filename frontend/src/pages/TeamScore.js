@@ -29,7 +29,16 @@ export default function TeamScore() {
     const [rounds, setRounds] = useState([]);
     const [employees, setEmployees] = useState([]);
     const [filterOpts, setFilterOpts] = useState({});
-    const [filters, setFilters] = useState({ employee_status: '', name: '', email: '', role: '', nirf_rank: '' });
+    const [filters, setFilters] = useState({ employee_status: '', team: '', name: '', email: '', role: '', nirf_rank: '' });
+    // iter156 — totals for filtered vs total badge and unnamed admin review.
+    const [counts, setCounts] = useState({ filtered: 0, total: 0 });
+    const [unnamedRows, setUnnamedRows] = useState([]);
+    const [showUnnamed, setShowUnnamed] = useState(false);
+    // Autocomplete state for the Search-by-Name/Email box.
+    const [search, setSearch] = useState('');
+    const [suggestions, setSuggestions] = useState([]);
+    const [suggestOpen, setSuggestOpen] = useState(false);
+    const suggestTimerRef = useRef();
     const [showRoundsModal, setShowRoundsModal] = useState(false);
     const [showEmpModal, setShowEmpModal] = useState(false);
     const [editingEmp, setEditingEmp] = useState(null);   // iter138 — edit-mode employee
@@ -73,14 +82,17 @@ export default function TeamScore() {
         try {
             const q = new URLSearchParams();
             Object.entries(currentFilters).forEach(([k, v]) => { if (v) q.append(k, v); });
-            const [rR, rE, rF] = await Promise.all([
+            const [rR, rE, rF, rU] = await Promise.all([
                 axios.get(`${TS}/rounds`, { withCredentials: true }),
                 axios.get(`${TS}/employees?${q.toString()}`, { withCredentials: true }),
                 axios.get(`${TS}/filters`, { withCredentials: true }),
+                axios.get(`${TS}/unnamed`, { withCredentials: true }).catch(() => ({ data: { unnamed: [] } })),
             ]);
             setRounds(rR.data.rounds || []);
             setEmployees(rE.data.employees || []);
+            setCounts({ filtered: rE.data.filtered_count ?? (rE.data.employees || []).length, total: rE.data.total_count ?? 0 });
             setFilterOpts(rF.data || {});
+            setUnnamedRows(rU.data?.unnamed || []);
             setPage(1);  // iter136 — reset to first page on any reload
         } catch (e) { toast.error(e.response?.data?.detail || 'Failed to load'); }
         setLoading(false);
@@ -95,7 +107,39 @@ export default function TeamScore() {
     useEffect(() => { fetchAll(); }, [fetchAll]);
 
     const handleFilter = () => fetchAll();
-    const handleReset = () => { setFilters({ employee_status: '', name: '', email: '', role: '', nirf_rank: '' }); setTimeout(fetchAll, 0); };
+    const handleReset = () => {
+        setFilters({ employee_status: '', team: '', name: '', email: '', role: '', nirf_rank: '' });
+        setSearch('');
+        setSuggestions([]);
+        setSuggestOpen(false);
+        setTimeout(fetchAll, 0);
+    };
+
+    // iter156 — Autocomplete query (debounced 200 ms).
+    const onSearchChange = (v) => {
+        setSearch(v);
+        setSuggestOpen(true);
+        if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
+        if (!v.trim()) { setSuggestions([]); return; }
+        suggestTimerRef.current = setTimeout(async () => {
+            try {
+                const r = await axios.get(`${TS}/suggest`, {
+                    params: { q: v, limit: 10 }, withCredentials: true,
+                });
+                setSuggestions(r.data.suggestions || []);
+            } catch (_err) { setSuggestions([]); }
+        }, 200);
+    };
+
+    const pickSuggestion = (s) => {
+        // Populate the Name filter with the exact selected name so the
+        // table collapses to that employee's row(s). The autocomplete
+        // search box stays filled for clarity.
+        setFilters(f => ({ ...f, name: s.name }));
+        setSearch(s.name);
+        setSuggestOpen(false);
+        setTimeout(fetchAll, 0);
+    };
 
     const handleExport = async (fmt) => {
         if (progress) return;
@@ -139,9 +183,11 @@ export default function TeamScore() {
                 },
             });
             const clamped = r.data.scores_clamped || 0;
+            const unnamed = r.data.unnamed_rows_captured || 0;
             toast.success(
                 `Imported: +${r.data.inserted} / updated ${r.data.updated}`
-                + (r.data.rounds_created?.length ? `; new rounds: ${r.data.rounds_created.join(', ')}` : '')
+                + (unnamed ? `; ${unnamed} unnamed row${unnamed === 1 ? '' : 's'} sent to admin review` : '')
+                + (r.data.rounds_created?.length ? `; new rounds: ${r.data.rounds_created.length}` : '')
                 + (clamped ? `; ${clamped} score${clamped === 1 ? '' : 's'} capped to round total` : '')
             );
             fetchAll();
@@ -204,8 +250,54 @@ export default function TeamScore() {
             </div>
 
             <div className="p-6 space-y-6">
+                {/* iter156 — Prominent Search-by-Name/Email with autocomplete.
+                    Matches partial names (case / whitespace tolerant), plus
+                    email ID. Each suggestion shows name, team and status. */}
+                <div className="relative" data-testid="ts-search-wrap">
+                    <label className="text-xs text-zinc-500 uppercase tracking-wider">Search Employee by Name or Email</label>
+                    <div className="relative mt-1">
+                        <input
+                            value={search}
+                            onChange={e => onSearchChange(e.target.value)}
+                            onFocus={() => { if (suggestions.length) setSuggestOpen(true); }}
+                            onBlur={() => setTimeout(() => setSuggestOpen(false), 150)}
+                            placeholder="Start typing — e.g. Kath …"
+                            data-testid="ts-search-input"
+                            className="w-full bg-zinc-900 border border-zinc-700 px-3 py-3 text-base focus:outline-none focus:border-cyan-600"
+                            autoComplete="off"
+                        />
+                        {suggestOpen && suggestions.length > 0 && (
+                            <ul
+                                data-testid="ts-search-suggestions"
+                                className="absolute z-40 top-full left-0 right-0 mt-1 max-h-72 overflow-y-auto bg-zinc-900 border border-zinc-700 shadow-xl">
+                                {suggestions.map(s => (
+                                    <li key={s.id}
+                                        onMouseDown={e => { e.preventDefault(); pickSuggestion(s); }}
+                                        data-testid={`ts-search-suggest-${s.id}`}
+                                        className="px-3 py-2 hover:bg-zinc-800 cursor-pointer border-b border-zinc-800 last:border-b-0">
+                                        <div className="flex items-center justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <div className="text-sm text-white truncate">{s.name || '—'}</div>
+                                                <div className="text-xs text-zinc-500 truncate">
+                                                    {s.email || '(no email)'} · {s.team || '—'} · <span className={s.employee_status === 'active' ? 'text-emerald-400' : 'text-red-400'}>{s.employee_status}</span>
+                                                </div>
+                                            </div>
+                                            {s.role ? <span className="text-xs text-zinc-500 whitespace-nowrap">{s.role}</span> : null}
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+                </div>
+
                 {/* Filters */}
-                <div className="bg-zinc-900 border border-zinc-800 p-4 grid grid-cols-1 md:grid-cols-6 gap-3" data-testid="ts-filters">
+                <div className="bg-zinc-900 border border-zinc-800 p-4 grid grid-cols-1 md:grid-cols-7 gap-3" data-testid="ts-filters">
+                    <select value={filters.team} onChange={e => setFilters({ ...filters, team: e.target.value })}
+                        data-testid="ts-filter-team" className="bg-zinc-800 border border-zinc-700 px-2 py-2 text-sm">
+                        <option value="">Team (all)</option>
+                        {(filterOpts.team || []).map(v => <option key={v} value={v}>{v}</option>)}
+                    </select>
                     <select value={filters.employee_status} onChange={e => setFilters({ ...filters, employee_status: e.target.value })}
                         data-testid="ts-filter-status" className="bg-zinc-800 border border-zinc-700 px-2 py-2 text-sm">
                         <option value="">Status (all)</option>
@@ -235,6 +327,12 @@ export default function TeamScore() {
                         <button onClick={handleFilter} data-testid="ts-filter-apply" className="px-3 py-2 bg-cyan-700 hover:bg-cyan-600 text-sm flex items-center gap-1"><FunnelSimple size={14} />Filter</button>
                         <button onClick={handleReset} data-testid="ts-filter-reset" className="px-3 py-2 bg-zinc-700 hover:bg-zinc-600 text-sm flex items-center gap-1"><ArrowsClockwise size={14} />Reset</button>
                     </div>
+                </div>
+
+                {/* iter156 — filtered count badge */}
+                <div className="text-xs text-zinc-400" data-testid="ts-count-badge">
+                    Showing <span className="text-white font-medium">{counts.filtered}</span> of <span className="text-white font-medium">{counts.total}</span> imported employees
+                    {unnamedRows.length > 0 && <span className="ml-3 text-amber-400">({unnamedRows.length} unnamed row{unnamedRows.length === 1 ? '' : 's'} pending admin review)</span>}
                 </div>
 
                 {/* Action bar */}
@@ -368,9 +466,50 @@ export default function TeamScore() {
                         </div>
                     </div>
                 )}
+                {/* iter156 — Admin Import Review: rows the latest import
+                    captured without an employee name. Collapsed by default.
+                    Never appear in the main table or in search. */}
+                {unnamedRows.length > 0 && (
+                    <div className="bg-zinc-900 border border-amber-900/50 p-4" data-testid="ts-unnamed-review">
+                        <button onClick={() => setShowUnnamed(v => !v)}
+                            data-testid="ts-unnamed-toggle"
+                            className="w-full flex items-center justify-between text-left text-sm text-amber-300 hover:text-amber-200">
+                            <span>Admin Import Review — {unnamedRows.length} row{unnamedRows.length === 1 ? '' : 's'} without an employee name</span>
+                            <span className="text-xs text-amber-400">{showUnnamed ? 'Hide' : 'Show'}</span>
+                        </button>
+                        {showUnnamed && (
+                            <div className="mt-3 overflow-x-auto">
+                                <table className="w-full text-xs">
+                                    <thead className="text-amber-300/70">
+                                        <tr>
+                                            <th className="text-left px-2 py-1">Source Row #</th>
+                                            <th className="text-left px-2 py-1">Team</th>
+                                            <th className="text-left px-2 py-1">Status</th>
+                                            <th className="text-left px-2 py-1">S.No</th>
+                                            <th className="text-left px-2 py-1">Role</th>
+                                            <th className="text-left px-2 py-1">Email</th>
+                                            <th className="text-left px-2 py-1">Notes</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {unnamedRows.map(u => (
+                                            <tr key={u.id} data-testid={`ts-unnamed-row-${u.source_row_index}`} className="border-t border-zinc-800">
+                                                <td className="px-2 py-1">{u.source_row_index + 1}</td>
+                                                <td className="px-2 py-1">{u.team || '—'}</td>
+                                                <td className="px-2 py-1">{u.employee_status || '—'}</td>
+                                                <td className="px-2 py-1">{u.s_no || '—'}</td>
+                                                <td className="px-2 py-1">{u.role || '—'}</td>
+                                                <td className="px-2 py-1">{u.email || '—'}</td>
+                                                <td className="px-2 py-1 text-zinc-500">{u.notes || '—'}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
-
-            {showRoundsModal && <RoundsModal rounds={sortedRounds} onClose={() => setShowRoundsModal(false)} onChanged={fetchAll} />}
             {showEmpModal && <EmployeeModal rounds={sortedRounds} editing={editingEmp} onClose={closeEmpModal} onChanged={fetchAll} />}
             {statusModal && <StatusModal emp={statusModal.emp} onConfirm={() => toggleStatus(statusModal.emp)} onClose={() => setStatusModal(null)} />}
             {deleteModal && <DeleteEmployeeModal emp={deleteModal.emp} onConfirm={() => deleteEmployee(deleteModal.emp)} onClose={() => setDeleteModal(null)} />}

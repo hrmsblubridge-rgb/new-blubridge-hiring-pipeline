@@ -29,6 +29,87 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - `BatchPanel.jsx` — batch rows now show "scenario: …" (`data-testid=batch-row-<id>-purpose`).
 - `/app/memory/test_credentials.md` corrected (password is `QAZwsx##123`, not `Admin User`).
 
+### 2026-02-14 — Team Score: Consolidated Excel import (iter156)
+**Context**: The existing `/api/team-score/import` read row 1 as headers,
+only extracted 9 base fields and discarded every other data column — the
+supplied "Team_Scores_Consolidated (3).xlsx" (114 cols × 185 rows: 183
+named + 2 unnamed, 3 teams) could not round-trip through it.
+**Code changes (additive; existing endpoints unchanged)**:
+- `backend/team_score.py`
+  * Auto-detect header row (scans first 10 rows for one with ≥3 non-empty
+    cells and at least one base-field match — Consolidated sheet puts
+    headers on row 2).
+  * Extended `_BASE_COL_MAP` to include Team / Employment Status /
+    Relieving Date / S.no / "Email ID/ Teams" / "Official Email/ Teams ID"
+    / "LinkedIn (URL)" / "NIRF (2025 Engineering)".
+  * Every row stores `raw_columns = [{col, header, value}]` for all 114
+    original columns verbatim — blank stays blank, 0 stays 0, dates keep
+    their ISO string form, duplicated headers (`Score /10` × 5) are
+    preserved by column position.
+  * Separate `team`, `employment_status` (verbatim "Active"/"Inactive")
+    and the canonical `employee_status` ("active"/"inactive") fields.
+  * Rows with blank `Name` go to `ts_employees_unnamed` for admin review;
+    never show up in `/employees` or `/suggest`.
+  * Stable `import_key = sha1(team|lowered-name|joining_date|s_no)` so
+    re-imports upsert in place — no row multiplication, no reliance on
+    serial number or name alone.
+  * One `bulk_write(ReplaceOne upsert=True)` for employees + one for
+    unnamed rows; auto-created rounds are inserted in a single pass.
+    Round-trip time dropped from >60s (Cloudflare 502) to ~3.3s against
+    Atlas.
+  * `?preview=1` dry-run mode returns header mapping, counts by team ×
+    status, unmapped headers, duplicated base headers, the 2 unnamed
+    rows and the first 10 named rows — nothing is written.
+  * New `GET /api/team-score/suggest?q=…` autocomplete (case /
+    whitespace tolerant substring match over name, email and Teams
+    email, returns name/team/employee_status/role per suggestion).
+  * New `GET /api/team-score/unnamed` returns the current admin-review
+    rows filtered by `superseded_at` NOT present, so re-imports don't
+    duplicate the review set and historical rows can be audited.
+  * `/employees` accepts `team` filter and returns `filtered_count` +
+    `total_count` so the UI can render the "Showing X / Y" badge.
+  * `/filters` now exposes `team` distinct values.
+- `frontend/src/pages/TeamScore.js`
+  * Prominent "Search Employee by Name or Email" input with debounced
+    (200 ms) autocomplete dropdown. Each suggestion shows name, email,
+    team, employee_status and role.
+  * Team dropdown added to the filters grid (7-column layout).
+  * "Showing X / Y imported employees" count badge + pending unnamed-row
+    chip.
+  * Collapsible "Admin Import Review" panel at the bottom showing the
+    unnamed rows with source row index, team, status, S.No, role, email
+    and note.
+  * Import toast now announces unnamed rows captured.
+  * Reset button also clears the search input and suggestions.
+
+**Live import against preview Atlas (Admin User session)**:
+- `POST /api/team-score/import?preview=1` → 114 cols, 183 named, 2
+  unnamed, team totals Research Unit 147 / Business Team 4 /
+  Support Staffs 32. By (team, status):
+  `{RU/active:38, RU/inactive:109, BT/active:2, BT/inactive:2, SS/active:6,
+  SS/inactive:26}` — matches the spec exactly.
+- `POST /api/team-score/import` (commit) → `{inserted:0, updated:183,
+  unnamed_rows_captured:2, scores_clamped:1}` after the preview-only
+  partial state from the timed-out first attempt was healed by the
+  bulk re-run. `/employees` now reports total_count:183 broken down
+  exactly as above. `/filters.team` returns `["Business Team",
+  "Research Unit", "Support Staffs"]`. `/suggest?q=Kath` returns
+  Kathirvel S (RU/active) and Kathiravan (RU/inactive).
+
+**Regression tests (all green)**:
+- `tests/test_iter156_team_score_consolidated_import.py` — 6 scratch-DB
+  integration tests: header row auto-detection, preview counts, commit
+  persists 114 raw_columns per doc (blank/zero preserved), re-import
+  idempotence (4 rows stay 4), team + status filter composition,
+  `/suggest` partial-match context, `/unnamed` returns full raw_columns.
+- `tests/test_iter139_team_score_email_dedup.py` existing suite still
+  passes alongside.
+
+**Safety**: unnamed rows are soft-superseded (never hard-deleted from
+app code); explicit admin-triggered upload is the only path that
+replaces `ts_employees` rows; the Team Score module continues to be
+completely isolated from the hiring pipeline collections.
+
 ### 2026-02-14 — Enhancement 2 consent-scope: Booking Confirmation gated by wording
 **Finding (before fix)**: The three calling purposes are declared in
 `ai_calling/purposes.py::PURPOSES = (interview_confirmation,

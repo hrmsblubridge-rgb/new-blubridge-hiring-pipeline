@@ -14,12 +14,13 @@ All endpoints under /api/team-score/* require admin auth.
 """
 
 import csv
+import hashlib
 import io
 import logging
 import os
 import re
 from datetime import datetime, date, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
@@ -291,6 +292,9 @@ def _build_filter_query(params: dict) -> dict:
     q = {}
     if params.get("employee_status"):
         q["employee_status"] = params["employee_status"]
+    team = (params.get("team") or "").strip()
+    if team:
+        q["team"] = team
     for f in ("name", "email", "role"):
         v = (params.get(f) or "").strip()
         if v:
@@ -305,6 +309,7 @@ def _build_filter_query(params: dict) -> dict:
 async def list_employees(
     request: Request,
     employee_status: Optional[str] = None,
+    team: Optional[str] = None,
     name: Optional[str] = None,
     email: Optional[str] = None,
     role: Optional[str] = None,
@@ -312,27 +317,31 @@ async def list_employees(
 ):
     await _require_auth(request)
     q = _build_filter_query({
-        "employee_status": employee_status, "name": name, "email": email,
-        "role": role, "nirf_rank": nirf_rank,
+        "employee_status": employee_status, "team": team,
+        "name": name, "email": email, "role": role, "nirf_rank": nirf_rank,
     })
-    # Sort: active first, then inactive; within each, name ASC.
     rows = await _db.ts_employees.find(q).to_list(None)
     rows.sort(key=lambda r: (
         (r.get("employee_status") or "active").lower() != "active",
+        (r.get("team") or "").lower(),
         (r.get("name") or "").lower(),
     ))
-    return {"employees": [_strip_oid(r) for r in rows]}
+    total = await _db.ts_employees.count_documents({})
+    return {"employees": [_strip_oid(r) for r in rows],
+            "filtered_count": len(rows), "total_count": total}
 
 
 @ts_router.get("/filters")
 async def filter_options(request: Request):
     """DISTINCT values pulled exclusively from ts_employees."""
     await _require_auth(request)
+
     async def _d(field):
         vals = await _db.ts_employees.distinct(field)
         return sorted([str(v) for v in vals if v])
     return {
         "employee_status": ["active", "inactive"],
+        "team": await _d("team"),
         "name": await _d("name"),
         "email": await _d("email"),
         "role": await _d("role"),
@@ -571,14 +580,104 @@ async def export_team_scores(
 _BASE_COL_MAP = {
     "name": "name", "employee name": "name", "full name": "name",
     "email": "email", "email id": "email", "email_id": "email",
+    "email id/ teams": "email", "email id/teams": "email",
+    "official email/ teams id": "email_teams_id",
+    "official email/teams id": "email_teams_id",
     "linkedin": "linkedin_id", "linkedin id": "linkedin_id", "linkedin_id": "linkedin_id",
+    "linkedin url": "linkedin_url", "linkedin profile": "linkedin_url",
     "role": "role", "designation": "role",
     "joining date": "joining_date", "joining_date": "joining_date", "doj": "joining_date",
+    "relieving date": "relieving_date", "relieving_date": "relieving_date",
+    "s.no": "s_no", "sno": "s_no", "s_no": "s_no", "serial no": "s_no", "serial_no": "s_no",
+    "team": "team", "department": "team",
+    "employment status": "employment_status", "employment_status": "employment_status",
     "college": "college", "institute": "college",
     "nirf rank": "nirf_rank", "nirf_rank": "nirf_rank", "nirf": "nirf_rank",
+    "nirf (2025 engineering)": "nirf_rank", "nirf (engineering)": "nirf_rank",
     "degree": "degree", "qualification": "degree",
     "passing year": "passing_year", "passing_year": "passing_year", "year of passing": "passing_year",
 }
+
+# iter156 — Header auto-detection: the Consolidated workbook puts a merged
+# group-header on row 1 and the actual column labels on row 2. Scan up to
+# `_HEADER_SCAN_MAX` leading rows and pick the first one that has at least
+# `_HEADER_MIN_NONEMPTY` non-empty string cells AND at least one recognised
+# base column, so legacy uploads (header on row 1) continue to work.
+_HEADER_SCAN_MAX = 10
+_HEADER_MIN_NONEMPTY = 3
+
+
+def _header_key(h: Any) -> str:
+    return re.sub(r"\s+", " ", str(h or "").strip()).lower()
+
+
+def _find_header_row(rows: list) -> int:
+    """Return the 0-based index of the row that contains the column headers.
+
+    A row qualifies when it has ≥ `_HEADER_MIN_NONEMPTY` non-empty string
+    cells and at least one cell matches `_BASE_COL_MAP` (so the "Name" column
+    can be located for row ingestion). Falls back to row 0 if nothing obvious
+    is found so the legacy single-header CSV path keeps working."""
+    scan = min(_HEADER_SCAN_MAX, len(rows))
+    for i in range(scan):
+        non_empty = [c for c in rows[i] if str(c or "").strip()]
+        if len(non_empty) < _HEADER_MIN_NONEMPTY:
+            continue
+        if any(_header_key(c) in _BASE_COL_MAP for c in rows[i]):
+            return i
+    return 0
+
+
+def _cell_value(v: Any) -> Any:
+    """Return a JSON-safe representation of an Excel cell.
+
+    - `None` and empty strings stay as "" so blanks never collapse to 0.
+    - Datetime/date → ISO 'yyyy-mm-dd' strings (Excel date serials are
+      already converted by openpyxl when the cell is typed as a date).
+    - Integer-valued floats become plain ints so ``0.0`` is persisted as ``0``.
+    - Everything else round-trips as-is."""
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, date):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, str):
+        return v.strip() if v.strip() != v else v
+    return v
+
+
+def _is_blank(v: Any) -> bool:
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
+
+def _normalize_status(v: Any) -> str:
+    """Map the Excel 'Employment Status' column to the canonical
+    `employee_status` ("active" | "inactive"). Preserves the original
+    verbatim string on the doc via `employment_status` for display."""
+    s = str(v or "").strip().lower()
+    if s in ("inactive", "relieved", "ex", "left", "exited"):
+        return "inactive"
+    return "active"
+
+
+def _import_key(team: str, name: str, joining_date: str, s_no: Any) -> str:
+    """Stable composite identifier for duplicate detection on re-import.
+    Based on (team, lowercased-name, joining_date, s_no) so the same
+    employee row maps to the same document across reruns even when
+    email is missing or shared. Returns '' if `name` is blank — unnamed
+    rows are routed to a separate review collection and never match by
+    this key."""
+    nm = re.sub(r"\s+", " ", str(name or "").strip().lower())
+    if not nm:
+        return ""
+    sn = str(s_no or "").strip()
+    jd = (joining_date or "").strip()
+    tm = (team or "").strip().lower()
+    base = f"{tm}|{nm}|{jd}|{sn}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()  # noqa: S324 — stable composite key, not a password
 
 
 def _row_has_inactive_marker(row) -> bool:
@@ -589,7 +688,28 @@ def _row_has_inactive_marker(row) -> bool:
 
 
 @ts_router.post("/import")
-async def import_team_scores(request: Request, file: UploadFile = File(...)):
+async def import_team_scores(
+    request: Request,
+    file: UploadFile = File(...),
+    preview: int = Query(0, ge=0, le=1),
+):
+    """Import the Consolidated workbook.
+
+    Supports CSV, .xls and .xlsx. Auto-detects the header row (skips the
+    leading merged-group row on the Consolidated sheet). Every one of the
+    original columns is preserved verbatim on each employee doc under
+    `raw_columns`, so blank stays blank, zero stays zero, dates keep their
+    original representation and duplicated headers (e.g. "Score /10" ×5)
+    are not collapsed. Rows with a blank `Name` are routed to the
+    `ts_employees_unnamed` collection for admin review instead of being
+    silently discarded or getting a fabricated name.
+
+    Query param `preview=1` runs in dry-run mode: nothing is written to
+    `ts_employees` / `ts_rounds` / `ts_employees_unnamed`. The response
+    contains the header mapping, row counts by team/status, the 2
+    unnamed rows and the first 10 named rows so admins can validate the
+    mapping before committing.
+    """
     await _require_auth(request)
     raw = await file.read()
     filename = (file.filename or "").lower()
@@ -603,26 +723,39 @@ async def import_team_scores(request: Request, file: UploadFile = File(...)):
         wb = load_workbook(io.BytesIO(raw), data_only=True)
         ws = wb.active
         for r in ws.iter_rows(values_only=True):
-            rows.append(["" if c is None else c for c in r])
+            rows.append(list(r))
     else:
         raise HTTPException(status_code=400, detail="Use .csv or .xlsx")
 
     if not rows:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    headers = [str(h or "").strip() for h in rows[0]]
-    body = rows[1:]
+    # iter156 — Auto-detect header row (Consolidated workbook puts headers on row 2).
+    header_row_idx = _find_header_row(rows)
+    headers = [str(h or "").strip() for h in rows[header_row_idx]]
+    body = rows[header_row_idx + 1:]
 
-    # Map columns: base fields are recognised via _BASE_COL_MAP;
-    # everything else is a TEAM ROUND NAME taken verbatim (no parsing).
+    # Column classification: base-field columns vs round-score columns.
     base_idx: dict = {}
     round_idx: list = []  # list of (col_index, round_name_verbatim)
+    base_dupes: list = []  # (header, col_index) when two headers map to the same base field
+    unmapped_blank_headers: list = []  # col_indexes with blank header but data below
     for i, h in enumerate(headers):
-        key = (h or "").strip().lower()
+        key = _header_key(h)
         if not h:
+            unmapped_blank_headers.append(i)
             continue
         if key in _BASE_COL_MAP:
-            base_idx[_BASE_COL_MAP[key]] = i
+            fld = _BASE_COL_MAP[key]
+            if fld in base_idx:
+                # Already mapped → keep the first occurrence as the base
+                # field and treat subsequent ones as additional "round"
+                # columns so duplicated headers (e.g. "Role" twice) are
+                # never silently dropped.
+                base_dupes.append((h, i))
+                round_idx.append((i, h.strip()))
+            else:
+                base_idx[fld] = i
             continue
         # iter135 — treat ENTIRE header as the round name. No bracket
         # parsing, no splitting, no total-score extraction.
@@ -631,114 +764,220 @@ async def import_team_scores(request: Request, file: UploadFile = File(...)):
     if "name" not in base_idx:
         raise HTTPException(status_code=400, detail="`Name` column missing")
 
-    # Ensure every detected round exists in ts_rounds (auto-create with
-    # NULL total_score — user explicitly does NOT want totals derived
-    # from column headers).
-    created_rounds = []
-    for _, rn in round_idx:
-        existing = await _db.ts_rounds.find_one(
-            {"round_name": {"$regex": f"^{re.escape(rn)}$", "$options": "i"}}
-        )
-        if not existing:
-            await _db.ts_rounds.insert_one({
-                "round_name": rn,
-                "total_score": None,  # NULL — no parsing of column header
-                "created_at": _now(),
-                "updated_at": _now(),
-            })
-            created_rounds.append(rn)
+    # Walk body: classify into named vs unnamed, build docs, collect preview data.
+    named_docs: list = []
+    unnamed_docs: list = []
+    status_from_marker = "active"
+    separators = 0
+    skipped_blank_rows = 0
+    row_errors: list = []
 
-    # Walk rows, switching status at "INACTIVE EMPLOYEES" markers.
-    status = "active"
-    inserted, updated, separators = 0, 0, 0
-    # iter143 — Build a fresh {round_name → total_score} lookup AFTER the
-    # auto-create pass above so we can clamp out-of-range scores during
-    # row ingestion. NULL/0 totals → no clamp possible.
-    round_totals: dict = {}
-    for _, rn in round_idx:
-        doc = await _db.ts_rounds.find_one(
-            {"round_name": {"$regex": f"^{re.escape(rn)}$", "$options": "i"}}
-        )
-        if doc:
-            ts = doc.get("total_score")
-            round_totals[rn] = float(ts) if ts not in (None, "") else None
-    scores_clamped = 0  # how many cells we capped
-
-    for r in body:
-        # Pad row to header length.
+    for row_offset, r in enumerate(body):
         if len(r) < len(headers):
             r = list(r) + [""] * (len(headers) - len(r))
-        # Skip fully-empty rows.
-        if all((str(v).strip() == "") for v in r):
+        if all(_is_blank(v) for v in r):
+            skipped_blank_rows += 1
             continue
-        # Status marker?
         if _row_has_inactive_marker(r):
-            status = "inactive"
+            status_from_marker = "inactive"
             separators += 1
             continue
 
         def _at(field):
             i = base_idx.get(field)
-            return "" if i is None else str(r[i] or "").strip()
+            if i is None:
+                return ""
+            v = r[i]
+            return "" if v is None else str(v).strip() if isinstance(v, str) else v
 
         nm = _at("name")
-        if not nm:
-            continue
+        raw_columns = [
+            {"col": idx, "header": headers[idx], "value": _cell_value(r[idx])}
+            for idx in range(len(headers))
+        ]
+        team_val = str(_at("team") or "").strip()
+        emp_stat_verbatim = str(_at("employment_status") or "").strip()
+        employee_status = _normalize_status(emp_stat_verbatim) if emp_stat_verbatim else status_from_marker
+
+        joining_norm = _normalize_joining_date(r[base_idx["joining_date"]]
+                                              if "joining_date" in base_idx else "")
+        relieving_norm = _normalize_joining_date(r[base_idx["relieving_date"]]
+                                                 if "relieving_date" in base_idx else "")
+
+        # Round scores: numeric cells only — non-numeric (e.g. date strings
+        # in a "Date" column) are left in raw_columns verbatim and do NOT
+        # get force-converted to zero. Blank also stays blank — key is
+        # simply not present in `round_scores`.
         scores = {}
         for i, rn in round_idx:
             v = r[i]
-            if v in (None, ""):
+            if _is_blank(v):
                 continue
             try:
-                sv = float(v)
+                scores[rn] = float(v)
             except (TypeError, ValueError):
                 continue
-            # iter143 — Clamp out-of-range scores to the round's total.
-            # If the round has a NULL/0 total, leave the value alone
-            # (there's no ceiling to clamp against).
-            t = round_totals.get(rn)
-            if t is not None and t > 0 and sv > t:
-                sv = t
-                scores_clamped += 1
-            scores[rn] = sv
-        # iter135 — joining_date is normalized to canonical yyyy-mm-dd.
-        joining_raw = ""
-        ji = base_idx.get("joining_date")
-        if ji is not None:
-            joining_raw = r[ji]
+
+        if not str(nm or "").strip():
+            # iter156 — unnamed rows are kept for admin review.
+            unnamed_docs.append({
+                "source_row_index": header_row_idx + 1 + row_offset,  # 0-based position in original workbook
+                "team": team_val,
+                "employment_status_raw": emp_stat_verbatim,
+                "employee_status": employee_status,
+                "s_no": _at("s_no"),
+                "joining_date": joining_norm,
+                "relieving_date": relieving_norm,
+                "role": str(_at("role") or "").strip(),
+                "email": str(_at("email") or "").strip(),
+                "raw_columns": raw_columns,
+                "notes": "No employee name recorded in source workbook",
+                "created_at": _now(),
+                "updated_at": _now(),
+            })
+            continue
+
+        email_val = str(_at("email") or "").strip()
         doc = {
-            "employee_status": status,
-            "name": nm,
-            "email": _at("email"),
-            "linkedin_id": _at("linkedin_id"),
-            "role": _at("role"),
-            "joining_date": _normalize_joining_date(joining_raw),
-            "college": _at("college"),
-            "nirf_rank": _at("nirf_rank"),
-            "degree": _at("degree"),
-            "passing_year": _at("passing_year"),
+            "team": team_val,
+            "employment_status": emp_stat_verbatim,
+            "employee_status": employee_status,
+            "s_no": _at("s_no"),
+            "name": str(nm).strip(),
+            "joining_date": joining_norm,
+            "relieving_date": relieving_norm,
+            "role": str(_at("role") or "").strip(),
+            "email": email_val,
+            "email_teams_id": str(_at("email_teams_id") or "").strip(),
+            "linkedin_id": str(_at("linkedin_id") or "").strip(),
+            "linkedin_url": str(_at("linkedin_url") or "").strip(),
+            "college": str(_at("college") or "").strip(),
+            "nirf_rank": str(_at("nirf_rank") or "").strip(),
+            "degree": str(_at("degree") or "").strip(),
+            "passing_year": str(_at("passing_year") or "").strip(),
             "round_scores": scores,
+            "raw_columns": raw_columns,
+            "import_key": _import_key(team_val, str(nm), joining_norm, _at("s_no")),
             "created_at": _now(),
             "updated_at": _now(),
         }
-        # iter139 — Email-based full replace (case-insensitive).
-        # If the email already exists (even across multiple legacy
-        # duplicate rows), every match is wiped and replaced by this
-        # incoming doc — latest record wins, no field merging.
-        # Empty-email rows still insert (cannot dedup without a key).
-        email_lc = (doc["email"] or "").strip().lower()
-        was_existing = False
-        if email_lc:
-            existing_count = await _db.ts_employees.count_documents(
-                {"email": {"$regex": f"^{re.escape(doc['email'])}$",
-                           "$options": "i"}}
-            )
-            was_existing = existing_count > 0
-        await _replace_by_email(doc)
-        if was_existing:
-            updated += 1
-        else:
-            inserted += 1
+        named_docs.append(doc)
+
+    # Build counts summary (named only, by (team, employee_status)).
+    from collections import Counter
+    by_team_status = Counter((d["team"], d["employee_status"]) for d in named_docs)
+    team_totals = Counter(d["team"] for d in named_docs)
+
+    preview_payload = {
+        "filename": file.filename,
+        "header_row_index": header_row_idx,
+        "headers": headers,
+        "header_count": len(headers),
+        "base_columns_mapped": base_idx,
+        "round_columns": [h for _, h in round_idx],
+        "duplicate_base_headers": base_dupes,
+        "unmapped_blank_header_columns": unmapped_blank_headers,
+        "counts": {
+            "named_rows": len(named_docs),
+            "unnamed_rows": len(unnamed_docs),
+            "blank_rows_skipped": skipped_blank_rows,
+            "inactive_separator_markers": separators,
+            "team_totals": dict(team_totals),
+            "by_team_status": {f"{t}|{s}": n for (t, s), n in by_team_status.items()},
+        },
+        "sample_named": [{k: d.get(k) for k in ("team", "employment_status", "name",
+                                                "email", "role", "joining_date")}
+                         for d in named_docs[:10]],
+        "unnamed_rows": [{"source_row_index": u["source_row_index"], "team": u["team"],
+                          "employee_status": u["employee_status"], "role": u["role"],
+                          "s_no": u["s_no"], "email": u["email"],
+                          "notes": u["notes"]} for u in unnamed_docs],
+        "row_errors": row_errors,
+    }
+    if preview:
+        return {"preview": True, **preview_payload}
+
+    # Commit path -------------------------------------------------------------
+    # Build a single bulk_write across employees + rounds to keep remote Atlas
+    # latency well under the 60s proxy ceiling. 183 rows × ~4 single-doc ops
+    # was timing out; one `bulk_write` finishes in a couple of seconds.
+    from pymongo import ReplaceOne, InsertOne, UpdateOne
+
+    created_rounds: list = []
+    existing_round_names = {r["round_name"].lower(): r for r in
+                            await _db.ts_rounds.find({}).to_list(None)}
+    new_round_docs: list = []
+    for _, rn in round_idx:
+        if rn.lower() not in existing_round_names:
+            new_round_docs.append({"round_name": rn, "total_score": None,
+                                   "created_at": _now(), "updated_at": _now()})
+            existing_round_names[rn.lower()] = {"round_name": rn, "total_score": None}
+            created_rounds.append(rn)
+    if new_round_docs:
+        await _db.ts_rounds.insert_many(new_round_docs)
+
+    # iter143 — round totals for clamping (NULL/0 totals skip clamp).
+    round_totals: dict = {
+        r["round_name"]: (float(r["total_score"]) if r.get("total_score") not in (None, "") else None)
+        for r in existing_round_names.values()
+    }
+    scores_clamped = 0
+
+    # Named rows: dedupe by `import_key` using a single bulk upsert. Re-imports
+    # replace the matching doc in place — no row multiplication, no orphaned
+    # legacy copies. Preserve `created_at` on existing docs by pulling them in
+    # one $in-query first.
+    import_keys = [d["import_key"] for d in named_docs if d.get("import_key")]
+    existing_by_key = {}
+    if import_keys:
+        async for r in _db.ts_employees.find({"import_key": {"$in": import_keys}},
+                                             {"import_key": 1, "created_at": 1, "_id": 1}):
+            existing_by_key[r["import_key"]] = r
+
+    ops = []
+    for doc in named_docs:
+        for rn, sv in list(doc["round_scores"].items()):
+            t = round_totals.get(rn)
+            if t is not None and t > 0 and sv > t:
+                doc["round_scores"][rn] = t
+                scores_clamped += 1
+        key = doc.get("import_key") or ""
+        prior = existing_by_key.get(key)
+        if prior:
+            doc["created_at"] = prior.get("created_at", doc["created_at"])
+        ops.append(ReplaceOne({"import_key": key}, doc, upsert=True))
+
+    inserted = updated = 0
+    if ops:
+        res = await _db.ts_employees.bulk_write(ops, ordered=False)
+        upserted_ids = getattr(res, "upserted_ids", {}) or {}
+        inserted = len(upserted_ids)
+        # `modified_count` reflects docs whose fields actually changed on a
+        # second import; `matched_count - modified_count` would be unchanged
+        # replacements. Expose "updated" as matched-but-not-upserted so a
+        # re-run of the same file reports `updated == len(named_docs)`.
+        updated = res.matched_count
+
+    # Unnamed rows: soft-supersede any previously-captured review rows that
+    # are NOT present in this upload, then upsert each current one by its
+    # `source_row_index`. No collection-wide deletes; the `/unnamed`
+    # endpoint filters out superseded docs so admins only see the latest
+    # review set.
+    unnamed_superseded = 0
+    if unnamed_docs:
+        current_indexes = [u["source_row_index"] for u in unnamed_docs]
+        res = await _db.ts_employees_unnamed.update_many(
+            {"source_row_index": {"$nin": current_indexes},
+             "superseded_at": {"$exists": False}},
+            {"$set": {"superseded_at": _now()}},
+        )
+        unnamed_superseded = res.modified_count
+        un_ops = [
+            UpdateOne({"source_row_index": u["source_row_index"]},
+                      {"$set": u, "$unset": {"superseded_at": ""}}, upsert=True)
+            for u in unnamed_docs
+        ]
+        await _db.ts_employees_unnamed.bulk_write(un_ops, ordered=False)
 
     return {
         "success": True,
@@ -747,7 +986,52 @@ async def import_team_scores(request: Request, file: UploadFile = File(...)):
         "separators": separators,
         "rounds_created": created_rounds,
         "scores_clamped": scores_clamped,
+        "unnamed_rows_captured": len(unnamed_docs),
+        "unnamed_rows_superseded": unnamed_superseded,
+        "preview": preview_payload["counts"],
     }
+
+
+@ts_router.get("/unnamed")
+async def list_unnamed_rows(request: Request):
+    """Rows the latest import could not attach to a named employee because
+    the `Name` column was blank. Kept here for admin review only — they
+    never appear in the main table or in search."""
+    await _require_auth(request)
+    rows = await _db.ts_employees_unnamed.find(
+        {"superseded_at": {"$exists": False}},
+    ).sort("source_row_index", 1).to_list(None)
+    return {"unnamed": [_strip_oid(r) for r in rows]}
+
+
+@ts_router.get("/suggest")
+async def suggest_employees(request: Request, q: str = Query("", max_length=200),
+                            limit: int = Query(10, ge=1, le=25)):
+    """Name/email autocomplete. Case-insensitive substring match over
+    `name` and `email`. Each suggestion carries the employee's name,
+    team and employment status so the dropdown can show context
+    straight away."""
+    await _require_auth(request)
+    term = (q or "").strip()
+    if not term:
+        return {"suggestions": []}
+    # Collapse whitespace inside the query but keep the escaped original
+    # for the regex so e.g. "Kath  S" matches "Kathirvel S".
+    pattern = re.escape(re.sub(r"\s+", " ", term))
+    rx = {"$regex": pattern, "$options": "i"}
+    rows = await _db.ts_employees.find(
+        {"$or": [{"name": rx}, {"email": rx}, {"email_teams_id": rx}]},
+    ).limit(limit).to_list(None)
+    rows.sort(key=lambda r: (
+        (r.get("employee_status") or "active").lower() != "active",
+        (r.get("name") or "").lower(),
+    ))
+    return {"suggestions": [
+        {"id": str(r["_id"]), "name": r.get("name") or "", "email": r.get("email") or "",
+         "team": r.get("team") or "", "employee_status": r.get("employee_status") or "active",
+         "role": r.get("role") or ""}
+        for r in rows
+    ]}
 
 
 # ─────────────────────── Attach ──────────────────────────────────────────
