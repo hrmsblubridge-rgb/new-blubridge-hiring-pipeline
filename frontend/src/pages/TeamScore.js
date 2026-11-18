@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import {
     ArrowLeft, Plus, PencilSimple, Trash, X, Square,
     DownloadSimple, UploadSimple, ArrowsClockwise, FunnelSimple,
-    LinkedinLogo, Check,
+    LinkedinLogo, Check, CaretUp, CaretDown, CaretUpDown, Warning,
 } from '@phosphor-icons/react';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import ProgressDialog from '../components/ProgressDialog';
@@ -81,14 +81,18 @@ export default function TeamScore() {
 
     const sortedRounds = useMemo(() => [...rounds].sort((a, b) => a.round_name.localeCompare(b.round_name)), [rounds]);
 
-    // iter136 — pagination math.
+    // iter160 — Sort state. `key` is a stable column identifier:
+    //   'status' | 'actions' (never sortable) | column_schema.column_id | legacy
+    //   fallback keys ('name' / 'email' / BASE_COLS[*].key / '__round__<name>').
+    // `dir` cycles asc → desc → null (unsorted = fetch order). Sorting is
+    // applied to the full `employees` array BEFORE pagination so clicking a
+    // header re-orders the complete filtered dataset, not just the visible page.
+    const [sortState, setSortState] = useState({ key: null, dir: null });
+
+    // iter160 — Pagination math over the SORTED employees.
     const totalRecords = employees.length;
     const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
     const currentPage = Math.min(Math.max(1, page), totalPages);
-    const pagedEmployees = useMemo(() => {
-        const start = (currentPage - 1) * pageSize;
-        return employees.slice(start, start + pageSize);
-    }, [employees, currentPage, pageSize]);
 
     const goToPage = (p) => {
         const target = Math.min(Math.max(1, Math.floor(Number(p) || 1)), totalPages);
@@ -388,6 +392,194 @@ export default function TeamScore() {
         return /^https?:\/\//i.test(v) && /linkedin\.com\//i.test(v);
     };
 
+    // iter160 — Email column consolidation. Columns H ("Email ID/ Teams")
+    // and I ("Official Email/ Teams ID") both store the same type of value;
+    // we hide I and render H as a single "Email / Teams ID" cell, picking
+    // the non-empty value (de-duped if identical, badged if conflicting).
+    // Both underlying raw_columns values stay untouched in the DB and in
+    // export so round-trip import/export is lossless.
+    const emailPrimaryIdx = useMemo(() => {
+        if (!columnSchema.length) return -1;
+        return columnSchema.findIndex(c => {
+            const h = (c.header || '').toLowerCase().trim();
+            return h === 'email id/ teams' || h === 'email id/teams' || h === 'email id / teams';
+        });
+    }, [columnSchema]);
+    const emailSecondaryIdx = useMemo(() => {
+        if (!columnSchema.length) return -1;
+        return columnSchema.findIndex(c => {
+            const h = (c.header || '').toLowerCase().trim();
+            return h === 'official email/ teams id' || h === 'official email/teams id' || h === 'official email / teams id';
+        });
+    }, [columnSchema]);
+    const emailCellVal = (v) => {
+        if (v === null || v === undefined) return '';
+        const s = String(v).trim();
+        if (!s || s === '-' || s === '–') return '';
+        return s;
+    };
+    const mergedEmail = (v1, v2) => {
+        const a = emailCellVal(v1), b = emailCellVal(v2);
+        if (!a && !b) return { display: '', primary: '', secondary: '', conflict: false };
+        if (a && !b) return { display: a, primary: a, secondary: '', conflict: false };
+        if (!a && b) return { display: b, primary: b, secondary: '', conflict: false };
+        if (a.toLowerCase() === b.toLowerCase()) return { display: a, primary: a, secondary: '', conflict: false };
+        return { display: a, primary: a, secondary: b, conflict: true };
+    };
+
+    // iter160 — Sort helpers. Build a stable comparison value per employee
+    // for the selected `sortKey`. Handles: merged email, LinkedIn link,
+    // schema-driven raw_columns cells, and the legacy (pre-import) fallback.
+    const parseDateForSort = (v) => {
+        if (v === null || v === undefined || v === '') return null;
+        const s = String(v).trim();
+        const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/.exec(s);
+        if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])).getTime();
+        const dmy = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/.exec(s);
+        if (dmy) return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1])).getTime();
+        return null;
+    };
+    const rawByColFor = (emp) => {
+        const map = {};
+        (emp.raw_columns || []).forEach(rc => { map[rc.col] = rc.value; });
+        return map;
+    };
+    const getSortValue = useCallback((emp, key) => {
+        if (key === 'status') return (emp.employee_status || 'active');
+        if (!columnSchema.length) {
+            if (key === '__name__') return emp.name || '';
+            if (key === '__email__') return emp.email || '';
+            if (key && key.startsWith('__round__')) {
+                const rn = key.slice('__round__'.length);
+                return emp.round_scores?.[rn];
+            }
+            return emp[key];
+        }
+        const col = columnSchema.find(c => c.column_id === key);
+        if (!col) return null;
+        const map = rawByColFor(emp);
+        if (col.col === emailPrimaryIdx) {
+            return mergedEmail(map[emailPrimaryIdx], map[emailSecondaryIdx]).display;
+        }
+        if (col.col === linkedInPrimaryIdx) {
+            const v1 = map[linkedInPrimaryIdx], v2 = map[linkedInSecondaryIdx];
+            return isValidLinkedInUrl(v1) ? v1 : (isValidLinkedInUrl(v2) ? v2 : '');
+        }
+        return map[col.col];
+    // mergedEmail / isValidLinkedInUrl / rawByColFor are pure helpers that
+    // close over the same state listed below; no need to re-add them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [columnSchema, emailPrimaryIdx, emailSecondaryIdx, linkedInPrimaryIdx, linkedInSecondaryIdx]);
+
+    const sortedEmployees = useMemo(() => {
+        if (!sortState.key || !sortState.dir) return employees;
+        const col = columnSchema.find(c => c.column_id === sortState.key);
+        const header = col?.header || '';
+        const treatAsDate = col ? isDateHeader(header) : /date|doj|dob/i.test(sortState.key || '');
+        const dir = sortState.dir === 'asc' ? 1 : -1;
+        const copy = [...employees];
+        copy.sort((a, b) => {
+            const va = getSortValue(a, sortState.key);
+            const vb = getSortValue(b, sortState.key);
+            const aEmpty = va === null || va === undefined || va === '' || va === '-' || va === '–';
+            const bEmpty = vb === null || vb === undefined || vb === '' || vb === '-' || vb === '–';
+            // Missing values always sorted to the end irrespective of direction.
+            if (aEmpty && bEmpty) return 0;
+            if (aEmpty) return 1;
+            if (bEmpty) return -1;
+            if (treatAsDate) {
+                const da = parseDateForSort(va), db = parseDateForSort(vb);
+                if (da === null && db === null) return 0;
+                if (da === null) return 1;
+                if (db === null) return -1;
+                return (da - db) * dir;
+            }
+            const na = Number(va), nb = Number(vb);
+            if (!Number.isNaN(na) && !Number.isNaN(nb)
+                && String(va).trim() !== '' && String(vb).trim() !== ''
+                && /^-?\d+(\.\d+)?$/.test(String(va).trim())
+                && /^-?\d+(\.\d+)?$/.test(String(vb).trim())) {
+                return (na - nb) * dir;
+            }
+            return String(va).toLowerCase().trim().localeCompare(String(vb).toLowerCase().trim()) * dir;
+        });
+        return copy;
+    }, [employees, sortState, columnSchema, getSortValue]);
+
+    const pagedEmployees = useMemo(() => {
+        const start = (currentPage - 1) * pageSize;
+        return sortedEmployees.slice(start, start + pageSize);
+    }, [sortedEmployees, currentPage, pageSize]);
+
+    const cycleSort = (key) => {
+        setSortState(prev => {
+            if (prev.key !== key) return { key, dir: 'asc' };
+            if (prev.dir === 'asc') return { key, dir: 'desc' };
+            if (prev.dir === 'desc') return { key: null, dir: null };
+            return { key, dir: 'asc' };
+        });
+        setPage(1);
+    };
+    const SortIcon = ({ sortKey }) => {
+        if (sortState.key !== sortKey) return <CaretUpDown size={10} className="text-zinc-600" weight="bold" />;
+        if (sortState.dir === 'asc') return <CaretUp size={10} className="text-cyan-400" weight="bold" />;
+        if (sortState.dir === 'desc') return <CaretDown size={10} className="text-cyan-400" weight="bold" />;
+        return <CaretUpDown size={10} className="text-zinc-600" weight="bold" />;
+    };
+
+    // iter160 — Admin Import Review (unnamed rows) selection + delete state.
+    const [unnamedSelected, setUnnamedSelected] = useState(() => new Set());
+    const [unnamedBulkBusy, setUnnamedBulkBusy] = useState(false);
+    const [unnamedBulkModal, setUnnamedBulkModal] = useState(false);
+    const [unnamedDeleteModal, setUnnamedDeleteModal] = useState(null); // {row}
+    const toggleUnnamed = (id) => setUnnamedSelected(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+    });
+    const clearUnnamedSelection = () => setUnnamedSelected(new Set());
+    const selectAllUnnamed = () => setUnnamedSelected(new Set(unnamedRows.map(u => u.id)));
+    // Keep selections pruned when the unnamed list reloads (after a delete /
+    // re-import), so a stale id never sits in the selection set.
+    useEffect(() => {
+        setUnnamedSelected(prev => {
+            const valid = new Set(unnamedRows.map(u => u.id));
+            const next = new Set();
+            prev.forEach(id => { if (valid.has(id)) next.add(id); });
+            return next;
+        });
+    }, [unnamedRows]);
+    const deleteUnnamedSingle = async (row) => {
+        try {
+            await axios.delete(`${TS}/unnamed/${row.id}`, { withCredentials: true });
+            toast.success(`Removed row #${row.source_row_index + 1} from Admin Review`);
+            setUnnamedDeleteModal(null);
+            setUnnamedSelected(prev => { const n = new Set(prev); n.delete(row.id); return n; });
+            fetchAll();
+        } catch (err) { toast.error(err?.response?.data?.detail || 'Delete failed'); }
+    };
+    const confirmUnnamedBulkDelete = async () => {
+        if (unnamedSelected.size === 0 || unnamedBulkBusy) return;
+        setUnnamedBulkBusy(true);
+        try {
+            const ids = Array.from(unnamedSelected);
+            const r = await axios.post(`${TS}/unnamed/bulk-delete`, { ids }, { withCredentials: true });
+            const { deleted, requested, missing } = r.data || {};
+            if ((missing || 0) > 0) {
+                toast.warning(`Deleted ${deleted} of ${requested}. ${missing} no longer existed.`);
+            } else {
+                toast.success(`Removed ${deleted} import review row${deleted === 1 ? '' : 's'}`);
+            }
+            clearUnnamedSelection();
+            setUnnamedBulkModal(false);
+            fetchAll();
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || 'Bulk delete failed');
+        } finally {
+            setUnnamedBulkBusy(false);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-zinc-950 text-white">
             <div className="border-b border-zinc-800 p-6 flex items-center gap-3">
@@ -594,28 +786,49 @@ export default function TeamScore() {
                                                 );
                                             })()}
                                         </th>
-                                        <th data-testid="ts-th-status" className="px-3 py-2 text-left uppercase tracking-wider font-semibold whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 left-[40px] z-30 w-[72px] min-w-[72px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]">Status</th>
+                                        <th data-testid="ts-th-status"
+                                            onClick={() => cycleSort('status')}
+                                            title="Sort by employment status"
+                                            className="px-3 py-2 text-left uppercase tracking-wider font-semibold whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 left-[40px] z-30 w-[72px] min-w-[72px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)] cursor-pointer select-none hover:bg-zinc-800/60">
+                                            <span className="inline-flex items-center gap-1">Status<SortIcon sortKey="status" /></span>
+                                        </th>
                                         {columnSchema.map((col) => {
-                                            // iter159 — Hide the "LinkedIn ID" column from the view; it is
-                                            // merged into the "LinkedIn Profile" column below. Data in the
-                                            // underlying raw_columns is preserved.
+                                            // iter159 — Hide the "LinkedIn ID" column from the view; merged into "LinkedIn Profile".
+                                            // iter160 — Hide the "Official Email/ Teams ID" column; merged into "Email / Teams ID".
                                             if (col.col === linkedInSecondaryIdx) return null;
+                                            if (col.col === emailSecondaryIdx) return null;
                                             const nameIdx = columnSchema.findIndex(c => (c.header || '').toLowerCase() === 'name');
                                             const isNameCol = col.col === nameIdx;
                                             const isLinkedIn = col.col === linkedInPrimaryIdx;
+                                            const isEmailPrimary = col.col === emailPrimaryIdx;
                                             const sticky = isNameCol
                                                 ? 'sticky top-0 left-[112px] z-30 w-[200px] min-w-[200px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]'
                                                 : 'sticky top-0 z-20';
-                                            const headerLabel = isLinkedIn ? 'LinkedIn Profile' : col.header;
+                                            const headerLabel = isLinkedIn
+                                                ? 'LinkedIn Profile'
+                                                : (isEmailPrimary ? 'Email / Teams ID' : col.header);
+                                            const fullTooltip = isLinkedIn
+                                                ? `Excel column ${col.letter} + ${columnSchema[linkedInSecondaryIdx]?.letter || ''} — LinkedIn Profile (merged)`
+                                                : isEmailPrimary
+                                                    ? `Excel column ${col.letter} + ${columnSchema[emailSecondaryIdx]?.letter || ''} — Email / Teams ID (merged: ${col.header_original || col.header} + ${columnSchema[emailSecondaryIdx]?.header_original || columnSchema[emailSecondaryIdx]?.header || ''})`
+                                                    : `Excel column ${col.letter} (position ${col.col + 1}) — ${col.header_original || col.header || '(blank header)'}`;
                                             return (
                                                 <th
                                                     key={col.column_id}
                                                     data-testid={`ts-th-${col.column_id}`}
                                                     data-col-letter={col.letter}
-                                                    title={`Excel column ${col.letter} (position ${col.col + 1}) — ${col.header || '(blank header)'}`}
-                                                    className={`px-3 py-2 text-left whitespace-pre-line align-bottom bg-zinc-900 border-b border-zinc-800 ${sticky}`}>
+                                                    title={fullTooltip}
+                                                    onClick={() => cycleSort(col.column_id)}
+                                                    className={`px-3 py-2 text-left align-bottom bg-zinc-900 border-b border-zinc-800 ${sticky} min-w-[110px] max-w-[220px] cursor-pointer select-none hover:bg-zinc-800/60`}>
                                                     <div className="text-[9px] text-zinc-600 font-normal tracking-wider">{col.letter}</div>
-                                                    <div className="text-[11px] uppercase tracking-wider font-semibold text-zinc-300 leading-tight">{headerLabel || <span className="text-zinc-600">(blank)</span>}</div>
+                                                    <div className="flex items-start justify-between gap-1">
+                                                        <div
+                                                            className="text-[11px] uppercase tracking-wider font-semibold text-zinc-300 leading-tight break-words"
+                                                            style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                                                            {headerLabel || <span className="text-zinc-600">(blank)</span>}
+                                                        </div>
+                                                        <span className="shrink-0 pt-0.5" data-testid={`ts-sort-${col.column_id}`}><SortIcon sortKey={col.column_id} /></span>
+                                                    </div>
                                                 </th>
                                             );
                                         })}
@@ -650,12 +863,15 @@ export default function TeamScore() {
                                                 </td>
                                                 {columnSchema.map((col) => {
                                                     if (col.col === linkedInSecondaryIdx) return null;
+                                                    if (col.col === emailSecondaryIdx) return null;
                                                     const isNameCol = col.col === nameIdx;
                                                     const isLinkedIn = col.col === linkedInPrimaryIdx;
+                                                    const isEmailPrimary = col.col === emailPrimaryIdx;
                                                     const sticky = isNameCol
                                                         ? 'sticky left-[112px] z-10 w-[200px] min-w-[200px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]'
                                                         : '';
                                                     let cellContent;
+                                                    let cellTitle;
                                                     if (isLinkedIn) {
                                                         // iter159 — Merge LinkedIn + LinkedIn ID. Prefer the K column;
                                                         // fall back to J when K is blank. Render as icon + "View Profile"
@@ -671,15 +887,41 @@ export default function TeamScore() {
                                                                 <span>View Profile</span>
                                                             </a>
                                                         ) : '–';
+                                                        cellTitle = url || '';
+                                                    } else if (isEmailPrimary) {
+                                                        // iter160 — Merge H + I email columns. Preserve both raw
+                                                        // values in DB/export; display only the primary + badge on
+                                                        // conflict; tooltip reveals both.
+                                                        const m = mergedEmail(rawByCol[emailPrimaryIdx], rawByCol[emailSecondaryIdx]);
+                                                        if (!m.display) {
+                                                            cellContent = '–';
+                                                            cellTitle = '';
+                                                        } else if (m.conflict) {
+                                                            cellContent = (
+                                                                <span className="inline-flex items-center gap-1.5 min-w-0" data-testid={`ts-${e.id}-email-conflict`}>
+                                                                    <span className="truncate max-w-[200px]" title={m.primary}>{m.primary}</span>
+                                                                    <span title={`Column H: ${m.primary}\nColumn I: ${m.secondary}`}
+                                                                        className="inline-flex items-center gap-0.5 text-[9px] font-semibold uppercase bg-amber-900/40 border border-amber-700/60 text-amber-200 px-1 py-0.5 tracking-wider shrink-0">
+                                                                        <Warning size={10} weight="fill" />Conflict
+                                                                    </span>
+                                                                </span>
+                                                            );
+                                                            cellTitle = `Column H: ${m.primary}\nColumn I: ${m.secondary}`;
+                                                        } else {
+                                                            cellContent = <span className="truncate block max-w-[240px]">{m.display}</span>;
+                                                            cellTitle = m.display;
+                                                        }
                                                     } else {
                                                         const v = rawByCol[col.col];
                                                         const raw = (v === '' || v === null || v === undefined) ? '-' : String(v);
                                                         cellContent = isDateHeader(col.header) ? fmtDateCell(v) : raw;
+                                                        cellTitle = (v === '' || v === null || v === undefined) ? '' : String(v);
                                                     }
                                                     return (
                                                         <td
                                                             key={col.column_id}
                                                             data-testid={`ts-${e.id}-${col.column_id}`}
+                                                            title={cellTitle || undefined}
                                                             className={`px-3 py-3 whitespace-nowrap bg-zinc-900 group-hover:bg-zinc-800 border-b border-zinc-800/50 transition-colors ${sticky} ${isBulkChecked ? 'bg-cyan-950/30' : ''}`}>
                                                             {cellContent}
                                                         </td>
@@ -823,22 +1065,59 @@ export default function TeamScore() {
                         </div>
                     </div>
                 )}
-                {/* iter156 — Admin Import Review: rows the latest import
-                    captured without an employee name. Collapsed by default.
-                    Never appear in the main table or in search. */}
+                {/* iter156 / iter160 — Admin Import Review: rows the latest
+                    import captured without an employee name. Admins can
+                    delete individual rows or multi-select + bulk-delete.
+                    Panel auto-hides when count reaches 0. */}
                 {unnamedRows.length > 0 && (
                     <div className="bg-zinc-900 border border-amber-900/50 p-4" data-testid="ts-unnamed-review">
-                        <button onClick={() => setShowUnnamed(v => !v)}
-                            data-testid="ts-unnamed-toggle"
-                            className="w-full flex items-center justify-between text-left text-sm text-amber-300 hover:text-amber-200">
-                            <span>Admin Import Review — {unnamedRows.length} row{unnamedRows.length === 1 ? '' : 's'} without an employee name</span>
-                            <span className="text-xs text-amber-400">{showUnnamed ? 'Hide' : 'Show'}</span>
-                        </button>
+                        <div className="flex items-center justify-between gap-3">
+                            <button onClick={() => setShowUnnamed(v => !v)}
+                                data-testid="ts-unnamed-toggle"
+                                className="flex-1 flex items-center justify-between text-left text-sm text-amber-300 hover:text-amber-200">
+                                <span>Admin Import Review — {unnamedRows.length} row{unnamedRows.length === 1 ? '' : 's'} without an employee name</span>
+                                <span className="text-xs text-amber-400 ml-3">{showUnnamed ? 'Hide' : 'Show'}</span>
+                            </button>
+                        </div>
+                        {showUnnamed && unnamedSelected.size > 0 && (
+                            <div className="mt-3 flex items-center justify-between gap-3 bg-amber-950/40 border border-amber-800/50 px-3 py-2" data-testid="ts-unnamed-bulk-bar">
+                                <span className="text-xs text-amber-200">
+                                    <span className="font-medium text-amber-100">{unnamedSelected.size}</span>
+                                    {' '}review row{unnamedSelected.size === 1 ? '' : 's'} selected
+                                </span>
+                                <div className="flex items-center gap-2">
+                                    <button onClick={() => setUnnamedBulkModal(true)} data-testid="ts-unnamed-bulk-delete"
+                                        className="px-3 py-1.5 bg-red-700 hover:bg-red-600 text-white text-xs inline-flex items-center gap-1.5">
+                                        <Trash size={12} />Delete Selected
+                                    </button>
+                                    <button onClick={clearUnnamedSelection} data-testid="ts-unnamed-bulk-clear"
+                                        className="px-3 py-1.5 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-xs inline-flex items-center gap-1.5">
+                                        <X size={12} />Clear Selection
+                                    </button>
+                                </div>
+                            </div>
+                        )}
                         {showUnnamed && (
                             <div className="mt-3 overflow-x-auto">
                                 <table className="w-full text-xs">
                                     <thead className="text-amber-300/70">
                                         <tr>
+                                            <th className="text-center px-2 py-1 w-[36px]">
+                                                {(() => {
+                                                    const allIds = unnamedRows.map(u => u.id);
+                                                    const allSel = allIds.length > 0 && allIds.every(id => unnamedSelected.has(id));
+                                                    const someSel = unnamedSelected.size > 0 && !allSel;
+                                                    return (
+                                                        <input type="checkbox"
+                                                            data-testid="ts-unnamed-select-all"
+                                                            aria-label="Select all import review rows"
+                                                            checked={allSel}
+                                                            ref={el => { if (el) el.indeterminate = someSel; }}
+                                                            onChange={() => allSel ? clearUnnamedSelection() : selectAllUnnamed()}
+                                                            className="accent-amber-500 cursor-pointer" />
+                                                    );
+                                                })()}
+                                            </th>
                                             <th className="text-left px-2 py-1">Source Row #</th>
                                             <th className="text-left px-2 py-1">Team</th>
                                             <th className="text-left px-2 py-1">Status</th>
@@ -846,20 +1125,41 @@ export default function TeamScore() {
                                             <th className="text-left px-2 py-1">Role</th>
                                             <th className="text-left px-2 py-1">Email</th>
                                             <th className="text-left px-2 py-1">Notes</th>
+                                            <th className="text-right px-2 py-1 w-[70px]">Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {unnamedRows.map(u => (
-                                            <tr key={u.id} data-testid={`ts-unnamed-row-${u.source_row_index}`} className="border-t border-zinc-800">
-                                                <td className="px-2 py-1">{u.source_row_index + 1}</td>
-                                                <td className="px-2 py-1">{u.team || '—'}</td>
-                                                <td className="px-2 py-1">{u.employee_status || '—'}</td>
-                                                <td className="px-2 py-1">{u.s_no || '—'}</td>
-                                                <td className="px-2 py-1">{u.role || '—'}</td>
-                                                <td className="px-2 py-1">{u.email || '—'}</td>
-                                                <td className="px-2 py-1 text-zinc-500">{u.notes || '—'}</td>
-                                            </tr>
-                                        ))}
+                                        {unnamedRows.map(u => {
+                                            const checked = unnamedSelected.has(u.id);
+                                            return (
+                                                <tr key={u.id} data-testid={`ts-unnamed-row-${u.source_row_index}`}
+                                                    className={`border-t border-zinc-800 ${checked ? 'bg-amber-950/20' : ''}`}>
+                                                    <td className="px-2 py-1 text-center">
+                                                        <input type="checkbox"
+                                                            checked={checked}
+                                                            onChange={() => toggleUnnamed(u.id)}
+                                                            data-testid={`ts-unnamed-cb-${u.id}`}
+                                                            aria-label={`Select source row ${u.source_row_index + 1}`}
+                                                            className="accent-amber-500 cursor-pointer" />
+                                                    </td>
+                                                    <td className="px-2 py-1">{u.source_row_index + 1}</td>
+                                                    <td className="px-2 py-1">{u.team || '—'}</td>
+                                                    <td className="px-2 py-1">{u.employee_status || '—'}</td>
+                                                    <td className="px-2 py-1">{u.s_no || '—'}</td>
+                                                    <td className="px-2 py-1">{u.role || '—'}</td>
+                                                    <td className="px-2 py-1">{u.email || '—'}</td>
+                                                    <td className="px-2 py-1 text-zinc-500">{u.notes || '—'}</td>
+                                                    <td className="px-2 py-1 text-right">
+                                                        <button onClick={() => setUnnamedDeleteModal({ row: u })}
+                                                            data-testid={`ts-unnamed-delete-${u.id}`}
+                                                            title={`Remove source row ${u.source_row_index + 1} from Admin Review`}
+                                                            className="p-1.5 text-red-400 hover:bg-red-900/30 transition-colors">
+                                                            <Trash size={14} />
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
                                     </tbody>
                                 </table>
                             </div>
@@ -874,6 +1174,64 @@ export default function TeamScore() {
                 so the "+ Add New Team Round" button looked broken even though
                 its onClick setter worked. */}
             {showRoundsModal && <RoundsModal rounds={sortedRounds} onClose={() => setShowRoundsModal(false)} onChanged={fetchAll} />}
+            {unnamedDeleteModal && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" data-testid="ts-unnamed-delete-modal">
+                    <div className="bg-zinc-900 border border-amber-900/60 max-w-md w-full p-6 space-y-4 shadow-xl">
+                        <h3 className="text-base font-semibold text-amber-200 flex items-center gap-2">
+                            <Trash size={18} />Remove Import Review Row?
+                        </h3>
+                        <div className="text-sm text-zinc-300 space-y-2">
+                            <p>This will remove the following unnamed row from Admin Import Review:</p>
+                            <div className="bg-zinc-950 border border-zinc-800 p-3 text-xs font-mono text-zinc-400 space-y-0.5">
+                                <div><span className="text-zinc-500">Source Row #:</span> <span className="text-zinc-200">{unnamedDeleteModal.row.source_row_index + 1}</span></div>
+                                <div><span className="text-zinc-500">Team:</span> <span className="text-zinc-200">{unnamedDeleteModal.row.team || '—'}</span></div>
+                                <div><span className="text-zinc-500">Status:</span> <span className="text-zinc-200">{unnamedDeleteModal.row.employee_status || '—'}</span></div>
+                                <div><span className="text-zinc-500">Role:</span> <span className="text-zinc-200">{unnamedDeleteModal.row.role || '—'}</span></div>
+                                <div><span className="text-zinc-500">Email:</span> <span className="text-zinc-200">{unnamedDeleteModal.row.email || '—'}</span></div>
+                                <div><span className="text-zinc-500">Notes:</span> <span className="text-zinc-300">{unnamedDeleteModal.row.notes || '—'}</span></div>
+                            </div>
+                            <p className="text-xs text-zinc-500">Only this import review entry is removed. No employee or Team Score data is affected.</p>
+                        </div>
+                        <div className="flex items-center justify-end gap-2 pt-2">
+                            <button onClick={() => setUnnamedDeleteModal(null)}
+                                data-testid="ts-unnamed-delete-cancel"
+                                className="px-3 py-2 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-sm">
+                                Cancel
+                            </button>
+                            <button onClick={() => deleteUnnamedSingle(unnamedDeleteModal.row)}
+                                data-testid="ts-unnamed-delete-confirm"
+                                className="px-3 py-2 bg-red-700 hover:bg-red-600 text-white text-sm inline-flex items-center gap-1.5">
+                                <Check size={14} />Confirm Delete
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {unnamedBulkModal && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" data-testid="ts-unnamed-bulk-modal">
+                    <div className="bg-zinc-900 border border-red-900/60 max-w-md w-full p-6 space-y-4 shadow-xl">
+                        <h3 className="text-base font-semibold text-red-300 flex items-center gap-2">
+                            <Trash size={18} />Remove {unnamedSelected.size} import review row{unnamedSelected.size === 1 ? '' : 's'}?
+                        </h3>
+                        <p className="text-sm text-zinc-400 leading-relaxed">
+                            This removes <span className="text-white font-medium">{unnamedSelected.size}</span> unnamed import review row{unnamedSelected.size === 1 ? '' : 's'}. Employee records, Team Score data, HRMS accounts and team rounds are not affected.
+                        </p>
+                        <p className="text-xs text-amber-300/80">This action cannot be undone.</p>
+                        <div className="flex items-center justify-end gap-2 pt-2">
+                            <button onClick={() => setUnnamedBulkModal(false)} disabled={unnamedBulkBusy}
+                                data-testid="ts-unnamed-bulk-cancel"
+                                className="px-3 py-2 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-sm disabled:opacity-50">
+                                Cancel
+                            </button>
+                            <button onClick={confirmUnnamedBulkDelete} disabled={unnamedBulkBusy}
+                                data-testid="ts-unnamed-bulk-confirm"
+                                className="px-3 py-2 bg-red-700 hover:bg-red-600 text-white text-sm inline-flex items-center gap-1.5 disabled:opacity-50">
+                                <Check size={14} />{unnamedBulkBusy ? 'Deleting…' : 'Confirm Delete'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
             {showBulkDeleteModal && (
                 <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" data-testid="ts-bulk-delete-modal">
                     <div className="bg-zinc-900 border border-red-900/60 max-w-md w-full p-6 space-y-4 shadow-xl">

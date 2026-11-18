@@ -1128,6 +1128,45 @@ async def list_unnamed_rows(request: Request):
     return {"unnamed": [_strip_oid(r) for r in rows]}
 
 
+# iter160 — Admin Import Review delete endpoints. Scoped STRICTLY to
+# `ts_employees_unnamed` and only to the explicit ObjectId list sent by the
+# admin confirmation dialog. Never touches `ts_employees`, `ts_rounds`,
+# HRMS accounts or any unrelated collection.
+@ts_router.delete("/unnamed/{unnamed_id}")
+async def delete_unnamed_row(unnamed_id: str, request: Request):
+    """Delete a single Admin Import Review row by its MongoDB `_id`."""
+    await _require_auth(request)
+    r = await _db.ts_employees_unnamed.delete_one({"_id": _oid(unnamed_id)})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Import review row not found")
+    return {"success": True}
+
+
+@ts_router.post("/unnamed/bulk-delete")
+async def bulk_delete_unnamed_rows(request: Request, body: dict = Body(...)):  # noqa: B008
+    """Delete multiple Admin Import Review rows by `_id`. Mirrors the
+    iter159 employee bulk-delete contract: honest `{requested, deleted,
+    missing}` envelope, malformed hex silently dropped, empty / all-
+    malformed → 400. Only `ts_employees_unnamed` is touched.
+    """
+    await _require_auth(request)
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="`ids` must be a non-empty list")
+    from bson import ObjectId
+    oids = []
+    for s in ids:
+        try:
+            oids.append(ObjectId(str(s).strip()))
+        except Exception:  # noqa: BLE001
+            continue
+    if not oids:
+        raise HTTPException(status_code=400, detail="No valid import review IDs supplied")
+    res = await _db.ts_employees_unnamed.delete_many({"_id": {"$in": oids}})
+    return {"success": True, "requested": len(ids), "deleted": res.deleted_count,
+            "missing": len(ids) - res.deleted_count}
+
+
 @ts_router.get("/suggest")
 async def suggest_employees(request: Request, q: str = Query("", max_length=200),
                             limit: int = Query(10, ge=1, le=25)):
