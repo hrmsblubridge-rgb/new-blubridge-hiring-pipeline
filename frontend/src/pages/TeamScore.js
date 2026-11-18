@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import {
     ArrowLeft, Plus, PencilSimple, Trash, X, Square,
     DownloadSimple, UploadSimple, ArrowsClockwise, FunnelSimple,
+    LinkedinLogo, Check,
 } from '@phosphor-icons/react';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import ProgressDialog from '../components/ProgressDialog';
@@ -181,6 +182,78 @@ export default function TeamScore() {
 
     const selectedIds = useMemo(() => new Set(selected.map(s => s.id)), [selected]);
 
+    // iter159 — Close suggestions on any mousedown outside the search card.
+    // Previous `onBlur` with a 180 ms timeout left the `z-40` dropdown
+    // intercepting clicks on the Add New Team Round / Add Employee buttons
+    // sitting below (and on the toolbar during the fade-out). This closes
+    // the dropdown synchronously before the click resolves on the real target.
+    useEffect(() => {
+        const onDocMouseDown = (ev) => {
+            if (!searchBoxRef.current) return;
+            if (!searchBoxRef.current.contains(ev.target)) {
+                setSuggestOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDocMouseDown);
+        return () => document.removeEventListener('mousedown', onDocMouseDown);
+    }, []);
+
+    // iter159 — Bulk selection state. `bulkSelected` holds ts_employees
+    // document ids explicitly ticked by the admin; never auto-populated
+    // from filter changes. "Select all visible" ticks the ids on the
+    // current page only; "Select all N matching" (if multiple pages)
+    // extends across the full filtered result set — both are explicit
+    // actions. Pagination / filter changes do NOT drop the selection, so
+    // an admin can build a cross-page selection.
+    const [bulkSelected, setBulkSelected] = useState(() => new Set());
+    const [bulkBusy, setBulkBusy] = useState(false);
+    const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+
+    const toggleBulk = (id) => setBulkSelected(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+    });
+    const clearBulk = () => setBulkSelected(new Set());
+    const selectAllVisible = (visibleIds) => {
+        setBulkSelected(prev => {
+            const next = new Set(prev);
+            visibleIds.forEach(id => next.add(id));
+            return next;
+        });
+    };
+    const deselectAllVisible = (visibleIds) => {
+        setBulkSelected(prev => {
+            const next = new Set(prev);
+            visibleIds.forEach(id => next.delete(id));
+            return next;
+        });
+    };
+    const selectAllFiltered = () => {
+        setBulkSelected(new Set(employees.map(e => e.id)));
+    };
+    const confirmBulkDelete = async () => {
+        if (bulkSelected.size === 0 || bulkBusy) return;
+        setBulkBusy(true);
+        try {
+            const ids = Array.from(bulkSelected);
+            const r = await axios.post(`${TS}/employees/bulk-delete`, { ids }, { withCredentials: true });
+            const { deleted, requested, missing } = r.data || {};
+            if ((missing || 0) > 0) {
+                toast.warning(`Deleted ${deleted} of ${requested}. ${missing} no longer existed.`);
+            } else {
+                toast.success(`Deleted ${deleted} employee record${deleted === 1 ? '' : 's'}`);
+            }
+            clearBulk();
+            setShowBulkDeleteModal(false);
+            fetchAll();
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || 'Bulk delete failed');
+        } finally {
+            setBulkBusy(false);
+        }
+    };
+
     const handleExport = async (fmt) => {
         if (progress) return;
         setProgress({ title: 'Preparing export…', message: `Preparing ${fmt.toUpperCase()} download.`, variant: 'busy' });
@@ -280,6 +353,39 @@ export default function TeamScore() {
         const m2 = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(v);
         if (m2) return `${m2[1].padStart(2, '0')}-${m2[2].padStart(2, '0')}-${m2[3]}`;
         return v;
+    };
+
+    // iter159 — DD-MM-YYYY formatter for any cell value that *looks* like a
+    // date; leaves everything else untouched. Handles ISO (YYYY-MM-DD),
+    // DD/MM/YYYY, DD-MM-YYYY. Returns the input as a string when no date
+    // pattern matches so numeric and text cells render as-is.
+    const fmtDateCell = (v) => {
+        if (v === null || v === undefined || v === '') return '-';
+        const s = String(v).trim();
+        const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/.exec(s);
+        if (iso) return `${iso[3].padStart(2, '0')}-${iso[2].padStart(2, '0')}-${iso[1]}`;
+        const dmy = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/.exec(s);
+        if (dmy) return `${dmy[1].padStart(2, '0')}-${dmy[2].padStart(2, '0')}-${dmy[3]}`;
+        return s;
+    };
+    const isDateHeader = (h) => /\bdate\b/i.test(String(h || '')) || /doj|dob/i.test(String(h || ''));
+    // iter159 — LinkedIn column consolidation. The Consolidated workbook
+    // has two adjacent columns (J "LinkedIn ID" + K "LinkedIn") that both
+    // store the profile URL; we hide column J and render K as a single
+    // "LinkedIn Profile" cell displaying only an icon + "View Profile"
+    // link to whichever column has a usable URL.
+    const linkedInPrimaryIdx = useMemo(() => {
+        if (!columnSchema.length) return -1;
+        return columnSchema.findIndex(c => (c.header || '').toLowerCase().trim() === 'linkedin');
+    }, [columnSchema]);
+    const linkedInSecondaryIdx = useMemo(() => {
+        if (!columnSchema.length) return -1;
+        return columnSchema.findIndex(c => (c.header || '').toLowerCase().trim() === 'linkedin id');
+    }, [columnSchema]);
+    const isValidLinkedInUrl = (s) => {
+        if (!s) return false;
+        const v = String(s).trim();
+        return /^https?:\/\//i.test(v) && /linkedin\.com\//i.test(v);
     };
 
     return (
@@ -439,7 +545,22 @@ export default function TeamScore() {
                         <button onClick={() => handleExport('csv')} data-testid="ts-export-csv" className="px-3 py-2 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-sm flex items-center gap-1"><DownloadSimple size={14} />Export CSV</button>
                         <button onClick={() => handleExport('xlsx')} data-testid="ts-export-xlsx" className="px-3 py-2 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-sm flex items-center gap-1"><DownloadSimple size={14} />Export XLSX</button>
                     </div>
-                    <div className="flex gap-2 flex-wrap">
+                    <div className="flex gap-2 flex-wrap items-center">
+                        {bulkSelected.size > 0 && (
+                            <>
+                                <span className="text-xs text-zinc-400 mr-1" data-testid="ts-bulk-count">
+                                    <span className="text-white font-medium">{bulkSelected.size}</span> selected
+                                </span>
+                                <button onClick={() => setShowBulkDeleteModal(true)} data-testid="ts-bulk-delete"
+                                    className="px-3 py-2 bg-red-700 hover:bg-red-600 text-white text-sm inline-flex items-center gap-1.5">
+                                    <Trash size={14} />Delete Selected
+                                </button>
+                                <button onClick={clearBulk} data-testid="ts-bulk-clear"
+                                    className="px-3 py-2 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-sm inline-flex items-center gap-1.5">
+                                    <X size={14} />Clear
+                                </button>
+                            </>
+                        )}
                         <button onClick={() => setShowEmpModal(true)} data-testid="ts-add-emp" className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-sm flex items-center gap-1"><Plus size={14} />Add New Employee Team Score</button>
                         <button onClick={() => setShowRoundsModal(true)} data-testid="ts-add-round" className="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-sm flex items-center gap-1"><Plus size={14} />Add New Team Round</button>
                     </div>
@@ -455,27 +576,50 @@ export default function TeamScore() {
                         {columnSchema.length > 0 ? (
                             <>
                                 <thead>
-                                    <tr className="text-xs uppercase tracking-wider text-zinc-500">
-                                        <th data-testid="ts-th-status" className="px-3 py-3 text-left whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 left-0 z-30 w-[64px] min-w-[64px]">Status</th>
+                                    <tr className="text-xs text-zinc-500">
+                                        <th data-testid="ts-th-bulk" className="px-2 py-2 text-center whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 left-0 z-30 w-[40px] min-w-[40px]">
+                                            {(() => {
+                                                const visibleIds = pagedEmployees.map(e => e.id);
+                                                const visSelCount = visibleIds.filter(id => bulkSelected.has(id)).length;
+                                                const allSel = visibleIds.length > 0 && visSelCount === visibleIds.length;
+                                                const someSel = visSelCount > 0 && !allSel;
+                                                return (
+                                                    <input type="checkbox"
+                                                        data-testid="ts-th-bulk-cb"
+                                                        aria-label="Select all visible rows"
+                                                        checked={allSel}
+                                                        ref={el => { if (el) el.indeterminate = someSel; }}
+                                                        onChange={() => allSel ? deselectAllVisible(visibleIds) : selectAllVisible(visibleIds)}
+                                                        className="accent-cyan-600 cursor-pointer" />
+                                                );
+                                            })()}
+                                        </th>
+                                        <th data-testid="ts-th-status" className="px-3 py-2 text-left uppercase tracking-wider font-semibold whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 left-[40px] z-30 w-[72px] min-w-[72px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]">Status</th>
                                         {columnSchema.map((col) => {
+                                            // iter159 — Hide the "LinkedIn ID" column from the view; it is
+                                            // merged into the "LinkedIn Profile" column below. Data in the
+                                            // underlying raw_columns is preserved.
+                                            if (col.col === linkedInSecondaryIdx) return null;
                                             const nameIdx = columnSchema.findIndex(c => (c.header || '').toLowerCase() === 'name');
                                             const isNameCol = col.col === nameIdx;
+                                            const isLinkedIn = col.col === linkedInPrimaryIdx;
                                             const sticky = isNameCol
-                                                ? 'sticky top-0 left-[64px] z-30 w-[200px] min-w-[200px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]'
+                                                ? 'sticky top-0 left-[112px] z-30 w-[200px] min-w-[200px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]'
                                                 : 'sticky top-0 z-20';
+                                            const headerLabel = isLinkedIn ? 'LinkedIn Profile' : col.header;
                                             return (
                                                 <th
                                                     key={col.column_id}
                                                     data-testid={`ts-th-${col.column_id}`}
                                                     data-col-letter={col.letter}
                                                     title={`Excel column ${col.letter} (position ${col.col + 1}) — ${col.header || '(blank header)'}`}
-                                                    className={`px-3 py-3 text-left whitespace-pre-line align-bottom bg-zinc-900 border-b border-zinc-800 ${sticky}`}>
-                                                    <div className="text-[10px] text-zinc-600 font-normal normal-case tracking-normal">{col.letter}</div>
-                                                    <div>{col.header || <span className="text-zinc-600">(blank)</span>}</div>
+                                                    className={`px-3 py-2 text-left whitespace-pre-line align-bottom bg-zinc-900 border-b border-zinc-800 ${sticky}`}>
+                                                    <div className="text-[9px] text-zinc-600 font-normal tracking-wider">{col.letter}</div>
+                                                    <div className="text-[11px] uppercase tracking-wider font-semibold text-zinc-300 leading-tight">{headerLabel || <span className="text-zinc-600">(blank)</span>}</div>
                                                 </th>
                                             );
                                         })}
-                                        <th data-testid="ts-th-actions" className="px-3 py-3 text-left whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 z-20">Actions</th>
+                                        <th data-testid="ts-th-actions" className="px-3 py-2 text-left uppercase tracking-wider font-semibold whitespace-nowrap bg-zinc-900 border-b border-zinc-800 sticky top-0 z-20">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -486,9 +630,17 @@ export default function TeamScore() {
                                         const rawByCol = {};
                                         (e.raw_columns || []).forEach(rc => { rawByCol[rc.col] = rc.value; });
                                         const nameIdx = columnSchema.findIndex(c => (c.header || '').toLowerCase() === 'name');
+                                        const isBulkChecked = bulkSelected.has(e.id);
                                         return (
-                                            <tr key={e.id} className="group" data-testid={`ts-row-${e.id}`}>
-                                                <td className="px-3 py-3 bg-zinc-900 group-hover:bg-zinc-800 border-b border-zinc-800/50 sticky left-0 z-10 w-[64px] min-w-[64px] transition-colors">
+                                            <tr key={e.id} className={`group ${isBulkChecked ? 'bg-cyan-950/20' : ''}`} data-testid={`ts-row-${e.id}`}>
+                                                <td className={`px-2 py-3 text-center bg-zinc-900 group-hover:bg-zinc-800 border-b border-zinc-800/50 sticky left-0 z-10 w-[40px] min-w-[40px] transition-colors ${isBulkChecked ? 'bg-cyan-950/30' : ''}`}>
+                                                    <input type="checkbox" checked={isBulkChecked}
+                                                        onChange={() => toggleBulk(e.id)}
+                                                        data-testid={`ts-bulk-cb-${e.id}`}
+                                                        aria-label={`Select ${e.name || 'row'}`}
+                                                        className="accent-cyan-600 cursor-pointer" />
+                                                </td>
+                                                <td className={`px-3 py-3 bg-zinc-900 group-hover:bg-zinc-800 border-b border-zinc-800/50 sticky left-[40px] z-10 w-[72px] min-w-[72px] transition-colors shadow-[inset_-1px_0_0_rgba(63,63,70,0.5)] ${isBulkChecked ? 'bg-cyan-950/30' : ''}`}>
                                                     <button onClick={() => setStatusModal({ emp: e })}
                                                         data-testid={`ts-status-${e.id}`}
                                                         title={active ? 'Active' : 'Inactive'}
@@ -497,22 +649,43 @@ export default function TeamScore() {
                                                     </button>
                                                 </td>
                                                 {columnSchema.map((col) => {
-                                                    const v = rawByCol[col.col];
-                                                    const display = (v === '' || v === null || v === undefined) ? '-' : String(v);
+                                                    if (col.col === linkedInSecondaryIdx) return null;
                                                     const isNameCol = col.col === nameIdx;
+                                                    const isLinkedIn = col.col === linkedInPrimaryIdx;
                                                     const sticky = isNameCol
-                                                        ? 'sticky left-[64px] z-10 w-[200px] min-w-[200px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]'
+                                                        ? 'sticky left-[112px] z-10 w-[200px] min-w-[200px] shadow-[inset_-1px_0_0_rgba(63,63,70,1)]'
                                                         : '';
+                                                    let cellContent;
+                                                    if (isLinkedIn) {
+                                                        // iter159 — Merge LinkedIn + LinkedIn ID. Prefer the K column;
+                                                        // fall back to J when K is blank. Render as icon + "View Profile"
+                                                        // link opening in a new tab; dash when neither has a valid URL.
+                                                        const v1 = rawByCol[linkedInPrimaryIdx];
+                                                        const v2 = rawByCol[linkedInSecondaryIdx];
+                                                        const url = isValidLinkedInUrl(v1) ? v1 : (isValidLinkedInUrl(v2) ? v2 : '');
+                                                        cellContent = url ? (
+                                                            <a href={url} target="_blank" rel="noopener noreferrer"
+                                                                data-testid={`ts-${e.id}-linkedin-link`}
+                                                                className="inline-flex items-center gap-1.5 text-cyan-400 hover:text-cyan-300 hover:underline">
+                                                                <LinkedinLogo size={14} weight="fill" />
+                                                                <span>View Profile</span>
+                                                            </a>
+                                                        ) : '–';
+                                                    } else {
+                                                        const v = rawByCol[col.col];
+                                                        const raw = (v === '' || v === null || v === undefined) ? '-' : String(v);
+                                                        cellContent = isDateHeader(col.header) ? fmtDateCell(v) : raw;
+                                                    }
                                                     return (
                                                         <td
                                                             key={col.column_id}
                                                             data-testid={`ts-${e.id}-${col.column_id}`}
-                                                            className={`px-3 py-3 whitespace-nowrap bg-zinc-900 group-hover:bg-zinc-800 border-b border-zinc-800/50 transition-colors ${sticky}`}>
-                                                            {display}
+                                                            className={`px-3 py-3 whitespace-nowrap bg-zinc-900 group-hover:bg-zinc-800 border-b border-zinc-800/50 transition-colors ${sticky} ${isBulkChecked ? 'bg-cyan-950/30' : ''}`}>
+                                                            {cellContent}
                                                         </td>
                                                     );
                                                 })}
-                                                <td className="px-3 py-3 whitespace-nowrap border-b border-zinc-800/50 group-hover:bg-zinc-800/30">
+                                                <td className={`px-3 py-3 whitespace-nowrap border-b border-zinc-800/50 group-hover:bg-zinc-800/30 ${isBulkChecked ? 'bg-cyan-950/30' : ''}`}>
                                                     <div className="flex items-center gap-2">
                                                         <button onClick={() => { setEditingEmp(e); setShowEmpModal(true); }}
                                                             data-testid={`ts-edit-${e.id}`}
@@ -697,6 +870,35 @@ export default function TeamScore() {
             {showEmpModal && <EmployeeModal rounds={sortedRounds} editing={editingEmp} onClose={closeEmpModal} onChanged={fetchAll} />}
             {statusModal && <StatusModal emp={statusModal.emp} onConfirm={() => toggleStatus(statusModal.emp)} onClose={() => setStatusModal(null)} />}
             {deleteModal && <DeleteEmployeeModal emp={deleteModal.emp} onConfirm={() => deleteEmployee(deleteModal.emp)} onClose={() => setDeleteModal(null)} />}
+            {/* iter159 — root-cause fix: this modal was never being rendered,
+                so the "+ Add New Team Round" button looked broken even though
+                its onClick setter worked. */}
+            {showRoundsModal && <RoundsModal rounds={sortedRounds} onClose={() => setShowRoundsModal(false)} onChanged={fetchAll} />}
+            {showBulkDeleteModal && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" data-testid="ts-bulk-delete-modal">
+                    <div className="bg-zinc-900 border border-red-900/60 max-w-md w-full p-6 space-y-4 shadow-xl">
+                        <h3 className="text-base font-semibold text-red-300 flex items-center gap-2">
+                            <Trash size={18} />Delete {bulkSelected.size} employee record{bulkSelected.size === 1 ? '' : 's'}?
+                        </h3>
+                        <p className="text-sm text-zinc-400 leading-relaxed">
+                            This will permanently remove <span className="text-white font-medium">{bulkSelected.size}</span> record{bulkSelected.size === 1 ? '' : 's'} from Team Score only. Employee HRMS accounts, team rounds and unrelated data are not affected.
+                        </p>
+                        <p className="text-xs text-amber-300/80">This action cannot be undone.</p>
+                        <div className="flex items-center justify-end gap-2 pt-2">
+                            <button onClick={() => setShowBulkDeleteModal(false)} disabled={bulkBusy}
+                                data-testid="ts-bulk-delete-cancel"
+                                className="px-3 py-2 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-sm disabled:opacity-50">
+                                Cancel
+                            </button>
+                            <button onClick={confirmBulkDelete} disabled={bulkBusy}
+                                data-testid="ts-bulk-delete-confirm"
+                                className="px-3 py-2 bg-red-700 hover:bg-red-600 text-white text-sm inline-flex items-center gap-1.5 disabled:opacity-50">
+                                <Check size={14} />{bulkBusy ? 'Deleting…' : 'Confirm Delete'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
             {/* iter155 — Shared progress dialog for import/export. */}
             <ProgressDialog
                 open={!!progress}

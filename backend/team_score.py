@@ -23,7 +23,7 @@ from datetime import datetime, date, timezone
 from typing import Any, Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
+from fastapi import APIRouter, Body, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel
@@ -430,6 +430,35 @@ async def update_employee(emp_id: str, body: EmployeeIn, request: Request):
         exclude_id=_oid(emp_id),
     )
     return {"success": True}
+
+
+@ts_router.post("/employees/bulk-delete")
+async def bulk_delete_employees(request: Request, body: dict = Body(...)):  # noqa: B008
+    """Delete multiple Team Score employee rows by `_id`. Narrowly filtered by
+    an explicit ObjectId list from an authenticated admin confirmation
+    dialog — never a collection-wide delete. Returns the deleted count so
+    the UI can report partial success honestly.
+
+    Request body: ``{"ids": ["<objectid hex>", ...]}``. Malformed hex is
+    silently dropped (never 500). Only rows in `ts_employees` are touched;
+    the employee's HRMS account, round catalogue and unrelated collections
+    are untouched (Team Score stores its own documents)."""
+    await _require_auth(request)
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="`ids` must be a non-empty list")
+    from bson import ObjectId
+    oids = []
+    for s in ids:
+        try:
+            oids.append(ObjectId(str(s).strip()))
+        except Exception:  # noqa: BLE001
+            continue
+    if not oids:
+        raise HTTPException(status_code=400, detail="No valid employee IDs supplied")
+    res = await _db.ts_employees.delete_many({"_id": {"$in": oids}})
+    return {"success": True, "requested": len(ids), "deleted": res.deleted_count,
+            "missing": len(ids) - res.deleted_count}
 
 
 @ts_router.delete("/employees/{emp_id}")

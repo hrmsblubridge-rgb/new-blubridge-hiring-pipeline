@@ -29,6 +29,25 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - `BatchPanel.jsx` — batch rows now show "scenario: …" (`data-testid=batch-row-<id>-purpose`).
 - `/app/memory/test_credentials.md` corrected (password is `QAZwsx##123`, not `Admin User`).
 
+### 2026-02-14 — Team Score: table header, DD-MM-YYYY, bulk-delete, LinkedIn merge, Round-modal regression fix (iter159)
+
+**Root cause of "+ Add New Team Round not working"**: the `{showRoundsModal && <RoundsModal>}` mount was removed from the main component's return block in an earlier iteration. The button's `onClick={() => setShowRoundsModal(true)}` was always firing correctly — the modal just had nothing to render against. Restored the mount next to the other modals (EmployeeModal / StatusModal / DeleteEmployeeModal) and added an iter159 comment flagging the fix so it isn't dropped again.
+
+**Changes (UI-only + 1 narrowly-filtered backend endpoint)**:
+- `backend/team_score.py` — new `POST /api/team-score/employees/bulk-delete`. Admin-auth gated. Body `{ids: [<objectid hex>, …]}`. Malformed hex is silently dropped (never 500); empty / all-malformed → 400. Uses `delete_many({"_id": {"$in": oids}})` — narrowly filtered by an explicit confirmed user action, per the repo policy. Returns `{requested, deleted, missing}` for honest partial-success reporting. Touches ONLY `ts_employees`; `ts_rounds`, `ts_employees_unnamed`, HRMS accounts and unrelated collections untouched.
+- `frontend/src/pages/TeamScore.js` (Team Score page only):
+  * **Table header redesign** — letter in `text-[9px] tracking-wider` muted zinc-600, header text in `text-[11px] uppercase tracking-wider font-semibold text-zinc-300` with tighter `py-2` padding and `leading-tight`. Preserved sticky Status / Name columns and all Excel-letter metadata used by import/export.
+  * **DD-MM-YYYY everywhere** — new `fmtDateCell()` detects ISO (`YYYY-MM-DD`), `DD/MM/YYYY` and `DD-MM-YYYY` and normalises display to `DD-MM-YYYY`; applied to every schema cell whose header contains "date" / "doj" / "dob". Backend storage is untouched; sorting still uses the raw stored values.
+  * **Bulk select + delete** — leftmost checkbox column (sticky `left:0`), header checkbox with `checked / indeterminate / unchecked` for the current page, per-row checkboxes, row highlight when ticked, floating "N selected / Delete Selected / Clear" controls in the action bar. Delete opens a confirmation modal that reports the count and warns the action is permanent and Team-Score-only; honest partial-success toast on completion (`Deleted X of Y. Z no longer existed.`).
+  * **LinkedIn columns consolidated** — J "LinkedIn ID" is hidden from the view; K "LinkedIn" is renamed "LinkedIn Profile" and rendered as `LinkedinLogo + "View Profile"` link opening in a new tab (`target=_blank rel="noopener noreferrer"`). Picks the non-empty valid URL from either source column; falls back to `–` when neither is a valid `https://linkedin.com/…`. Underlying `raw_columns` payload (both J and K values) is preserved for import/export round-trip.
+  * **Add New Team Round regression** — restored the `{showRoundsModal && <RoundsModal>}` render; added a synchronous document-level `mousedown` listener that closes the autocomplete dropdown the instant the user clicks outside the search card (previous 180-ms onBlur fade let the `z-40` `<li>`s intercept clicks on the toolbar below). Also added `<LinkedinLogo>` and `<Check>` icons.
+
+**Tests — 18/18 green**:
+- `tests/test_iter159_team_score_bulk_delete.py` (4 new): bulk-delete removes only listed IDs; partial success reports `missing`; malformed IDs → 400; empty / missing / wrong-type `ids` → 400.
+- iter158/157/156 suites unchanged, still green (4 + 4 + 6).
+
+**Preserved** (not touched by this iteration): scoring logic, employee records / IDs, DB schema, import / export, Add New Employee, Add New Team Round form itself, filters & multi-select search, Reset, pagination, role-based access, Excel-order column schema, unnamed-row admin review.
+
 ### 2026-02-14 — Team Score: multi-select employee + search/filter redesign (iter158)
 **Scope** (UI-only + one backend filter param; no business-logic, DB schema,
 import/export, calculations, pagination or role-access changes):
