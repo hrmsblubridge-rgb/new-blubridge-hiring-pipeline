@@ -2797,6 +2797,217 @@ async def _enrich_rows_with_ai_calls(docs: list) -> None:
         } if reg.get("reschedule_link_last_state") else {}
 
 
+# ---- Enhancement 1 — Candidate Responses enrichment (iter162) ----
+
+E1_FIELD_KEYS = {
+    "ch_in_person_availability", "ch_availability_reason", "ch_availability_other",
+    "ch_availability_at", "consent_ai_voice", "consent_version",
+    "consent_submitted_at", "wd_application", "wd_reason",
+    "wd_responded_at", "app_status", "hr_review_required",
+}
+
+
+def _format_iso_dt_ist(s) -> str:
+    """iter162 — ALWAYS render candidate-response timestamps in IST.
+    The spec mandates IST for Enhancement 1 columns regardless of the
+    AI_EXPORT_TIMEZONE env var that drives the Enhancement 2 helper."""
+    if not s:
+        return ""
+    try:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        dt = _dt.fromisoformat(str(s).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        ist = _tz(_td(hours=5, minutes=30), name="IST")
+        return dt.astimezone(ist).strftime("%Y-%m-%d %H:%M IST")
+    except Exception:
+        return (str(s)[:19].replace("T", " ") + " IST").strip()
+
+
+def _csv_safe(s) -> str:
+    """iter162 — Prevent Excel/CSV formula injection in candidate-supplied
+    free text (chennai `Other reason`, withdrawal reason). Prefixes a
+    leading =, +, -, @, \\t, \\r with a single quote so neither Excel nor
+    LibreOffice evaluates the cell as a formula on open. XLSX cells written
+    as strings by openpyxl also get this guard — openpyxl treats a leading
+    '=' as a formula unless we neutralise it here."""
+    if s is None:
+        return ""
+    v = str(s)
+    if v and v[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
+def _avail_yn(v) -> str:
+    """True → YES, False → NO, None/missing → NOT ANSWERED. The explicit
+    False case lets exports distinguish a candidate who answered NO from a
+    legacy / never-asked record (per spec)."""
+    if v is True:
+        return "YES"
+    if v is False:
+        return "NO"
+    return "NOT ANSWERED"
+
+
+def _consent_yn(status) -> str:
+    """granted → YES, withdrawn → NO (explicit refusal/revocation),
+    everything else (`not_given`, missing doc, legacy row) → NOT ANSWERED.
+    Booking by itself does NOT imply consent (per spec)."""
+    if status == "granted":
+        return "YES"
+    if status == "withdrawn":
+        return "NO"
+    return "NOT ANSWERED"
+
+
+def _consent_version_for(c: dict) -> str:
+    """Export the EXACT version the candidate accepted (or that was
+    recorded at withdrawal time), never the currently-published version.
+    Empty when no decision was ever submitted."""
+    status = c.get("consent_status")
+    if status in ("granted", "withdrawn"):
+        return str(c.get("consent_text_version") or "")
+    return ""
+
+
+def _consent_submitted_at(c: dict) -> str:
+    """IST timestamp of the authoritative consent decision. Grants use
+    `consent_timestamp`; withdrawals use `consent_withdrawn_at`. `not_given`
+    returns empty (never answered)."""
+    status = c.get("consent_status")
+    if status == "granted":
+        return _format_iso_dt_ist(c.get("consent_timestamp") or c.get("last_change_at") or "")
+    if status == "withdrawn":
+        return _format_iso_dt_ist(c.get("consent_withdrawn_at") or c.get("last_change_at") or "")
+    return ""
+
+
+def _withdrawal_yn(reg: dict) -> str:
+    """Explicit YES = finally withdrawn. Explicit NO = candidate was asked
+    and chose to keep the application active (the chennai submission
+    always stamps `chennai_availability_withdraw_decision`, so its
+    presence proves the candidate answered)."""
+    if reg.get("withdrawn_by_candidate"):
+        return "YES"
+    if reg.get("chennai_availability_withdraw_decision") is not None:
+        return "NO"
+    return "NOT ANSWERED"
+
+
+def _withdrawal_reason_text(reg: dict) -> str:
+    """Return the stored withdrawal reason text only when the candidate
+    actually withdrew. Fall back to the chennai reason captured at the
+    time the NO answer triggered the withdraw prompt."""
+    if not reg.get("withdrawn_by_candidate"):
+        return ""
+    return (reg.get("withdrawal_reason_text")
+            or reg.get("chennai_availability_reason_text")
+            or "")
+
+
+def _current_app_status(d: dict, reg: dict) -> str:
+    """Derived authoritative status for export. Withdrawal wins; then
+    attendance; then scheduled; then shortlisted; else the stored
+    registration status."""
+    if reg.get("withdrawn_by_candidate"):
+        return "Withdrawn"
+    if d.get("otp_verified"):
+        return "Attended"
+    if d.get("schedule_date"):
+        return "Interview Scheduled"
+    if d.get("is_shortlisted"):
+        return "Shortlisted"
+    return d.get("status") or "Registered"
+
+
+async def _enrich_rows_with_enhancement1(docs: list) -> None:
+    """iter162 — Attach the candidate's authoritative Chennai availability,
+    withdrawal state, HR-review flag and AI-voice-call consent (version +
+    timestamp) to each export row. Uses the SAME bb_registrations lookup as
+    the AI-call enrichment to avoid a second round-trip for the chennai /
+    withdrawal fields, then fetches `ai_candidate_consents` in a single
+    bulk query keyed on registration_id."""
+    emails = list({(d.get("email") or "").strip().lower() for d in docs if d.get("email")})
+    if not emails:
+        return
+    projection = {
+        "_id": 1, "email": 1, "schedule_date": 1, "status": 1, "is_shortlisted": 1,
+        "chennai_availability_latest": 1,
+        "chennai_availability_latest_at": 1,
+        "chennai_availability_reason_id": 1,
+        "chennai_availability_reason_text": 1,
+        "chennai_availability_other_text": 1,
+        "chennai_availability_withdraw_decision": 1,
+        "withdrawn_by_candidate": 1,
+        "withdrawn_at": 1,
+        "withdrawal_reason_id": 1,
+        "withdrawal_reason_text": 1,
+        "withdrawal_other_text": 1,
+        "needs_hr_review": 1,
+    }
+    cursor = _db.bb_registrations.find({"email": {"$in": emails}}, projection)
+    by_email: dict = {}
+    async for r in cursor:
+        em = (r.get("email") or "").strip().lower()
+        prior = by_email.get(em)
+        if prior and str(prior.get("schedule_date") or "") > str(r.get("schedule_date") or ""):
+            continue
+        by_email[em] = r
+    reg_ids = [str(r.get("_id")) for r in by_email.values() if r.get("_id")]
+    consents_by_rid: dict = {}
+    if reg_ids:
+        async for c in _db.ai_candidate_consents.find(
+            {"registration_id": {"$in": reg_ids}},
+            {"registration_id": 1, "consent_status": 1,
+             "consent_text_version": 1, "consent_timestamp": 1,
+             "consent_withdrawn_at": 1, "updated_at": 1, "last_change_at": 1},
+        ):
+            consents_by_rid[c["registration_id"]] = c
+    for d in docs:
+        em = (d.get("email") or "").strip().lower()
+        reg = by_email.get(em) or {}
+        d["_e1_reg"] = reg
+        rid = str(reg.get("_id")) if reg.get("_id") else ""
+        d["_e1_consent"] = consents_by_rid.get(rid) or {}
+
+
+# iter162 — Append Enhancement 1 catalog entries AFTER the helpers so each
+# extractor-lambda's forward reference is resolvable (static analysers flag
+# lambda bodies as module-level references even though they're deferred).
+EXPORT_FIELD_CATALOG.extend([
+    ("ch_in_person_availability", "Chennai In-Person Availability", "candidate_responses",
+        ["_e1_reg"], lambda d: _avail_yn((d.get("_e1_reg") or {}).get("chennai_availability_latest"))),
+    ("ch_availability_reason", "Chennai Availability Reason", "candidate_responses",
+        ["_e1_reg"], lambda d: _csv_safe(((d.get("_e1_reg") or {}).get("chennai_availability_reason_text") or "")
+                                         if (d.get("_e1_reg") or {}).get("chennai_availability_latest") is False else "")),
+    ("ch_availability_other", "Chennai Availability Other Reason", "candidate_responses",
+        ["_e1_reg"], lambda d: _csv_safe(((d.get("_e1_reg") or {}).get("chennai_availability_other_text") or "")
+                                         if (d.get("_e1_reg") or {}).get("chennai_availability_latest") is False else "")),
+    ("ch_availability_at", "Chennai Availability Answered At (IST)", "candidate_responses",
+        ["_e1_reg"], lambda d: _format_iso_dt_ist((d.get("_e1_reg") or {}).get("chennai_availability_latest_at") or "")),
+    ("consent_ai_voice", "AI Voice Call Consent", "candidate_responses",
+        ["_e1_consent"], lambda d: _consent_yn((d.get("_e1_consent") or {}).get("consent_status") or "")),
+    ("consent_version", "AI Consent Version", "candidate_responses",
+        ["_e1_consent"], lambda d: _consent_version_for(d.get("_e1_consent") or {})),
+    ("consent_submitted_at", "AI Consent Submitted At (IST)", "candidate_responses",
+        ["_e1_consent"], lambda d: _consent_submitted_at(d.get("_e1_consent") or {})),
+    ("wd_application", "Application Withdrawal", "candidate_responses",
+        ["_e1_reg"], lambda d: _withdrawal_yn(d.get("_e1_reg") or {})),
+    ("wd_reason", "Withdrawal Reason", "candidate_responses",
+        ["_e1_reg"], lambda d: _csv_safe(_withdrawal_reason_text(d.get("_e1_reg") or {}))),
+    ("wd_responded_at", "Withdrawal Responded At (IST)", "candidate_responses",
+        ["_e1_reg"], lambda d: _format_iso_dt_ist((d.get("_e1_reg") or {}).get("withdrawn_at") or "")),
+    ("app_status", "Current Application Status", "candidate_responses",
+        ["_e1_reg", "otp_verified", "schedule_date", "is_shortlisted", "status"],
+        lambda d: _current_app_status(d, d.get("_e1_reg") or {})),
+    ("hr_review_required", "HR Review Required", "candidate_responses",
+        ["_e1_reg"], lambda d: "YES" if (d.get("_e1_reg") or {}).get("needs_hr_review") else "NO"),
+])
+# Refresh the key→entry lookup so the Enhancement 1 columns are routable.
+EXPORT_FIELD_BY_KEY = {e[0]: e for e in EXPORT_FIELD_CATALOG}
+
+
 def _export_projection_for(field_keys):
     """Build a Mongo $project dict including all DB keys required by selected fields."""
     needed = {"_id": 0}
@@ -2848,18 +3059,20 @@ async def get_interview_reports_export_fields(
         "registration": {"id": "registration", "label": "Registration Fields", "fields": []},
         "interview": {"id": "interview", "label": "Interview Fields", "fields": []},
         "ai_calling": {"id": "ai_calling", "label": "AI Calling Fields", "fields": []},
+        "candidate_responses": {"id": "candidate_responses",
+                                "label": "Candidate Responses (Enhancement 1)", "fields": []},
     }
-    # AI Calling columns rely on bb_registrations.ai_call_results (not on
-    # pipeline_data keys), so sample-based key intersection would hide them
-    # on datasets that haven't received a verified call yet. Surface them
-    # unconditionally so admins can request them even on empty call history.
-    _ai_section_keys = set()
+    # AI Calling + Candidate Responses columns rely on `bb_registrations` /
+    # `ai_candidate_consents` (NOT on pipeline_data keys), so a sample-based
+    # intersection would hide them on datasets with no call history yet. We
+    # surface both sections unconditionally; empty cells are rendered as "".
+    _unconditional_section_keys = set()
     for key, label, section, db_keys, _extractor in EXPORT_FIELD_CATALOG:
-        if section == "ai_calling":
-            sections_map["ai_calling"]["fields"].append({"key": key, "label": label})
-            _ai_section_keys.add(key)
+        if section in ("ai_calling", "candidate_responses"):
+            sections_map[section]["fields"].append({"key": key, "label": label})
+            _unconditional_section_keys.add(key)
     for key, label, section, db_keys, _extractor in EXPORT_FIELD_CATALOG:
-        if key in _ai_section_keys:
+        if key in _unconditional_section_keys:
             continue
         # Always include the field if catalog says so AND at least one underlying
         # DB key is present in the sample. If the dataset is empty we still show
@@ -2869,7 +3082,8 @@ async def get_interview_reports_export_fields(
         sections_map[section]["fields"].append({"key": key, "label": label})
 
     return {
-        "sections": [sections_map["registration"], sections_map["interview"], sections_map["ai_calling"]],
+        "sections": [sections_map["registration"], sections_map["interview"],
+                     sections_map["ai_calling"], sections_map["candidate_responses"]],
         "total_matching": cnt,
     }
 
@@ -2934,7 +3148,12 @@ async def export_interview_reports(
     # Enhancement 2 Session 2 — if any ai_* column is requested, materialise
     # docs upfront so the per-row enrichment can run with a single DB round
     # trip. Non-AI exports stay fully streamed.
+    # iter162 — Same hoist when any Enhancement 1 candidate-response column
+    # is requested; bb_registrations + ai_candidate_consents must be joined
+    # before streaming starts.
     _wants_ai = any(k.startswith("ai_") for k in selected)
+    _wants_e1 = any(k in E1_FIELD_KEYS for k in selected)
+    _needs_hoist = _wants_ai or _wants_e1
 
     if format == "csv":
         # True streaming CSV with gzip compression — keeps the K8s 60 s ingress
@@ -2946,9 +3165,12 @@ async def export_interview_reports(
             buf = io.StringIO()
             writer = _csv.DictWriter(buf, fieldnames=headers)
             seen = set()
-            if _wants_ai:
+            if _needs_hoist:
                 docs_all = await src.aggregate(pipeline, allowDiskUse=True).to_list(None)
-                await _enrich_rows_with_ai_calls(docs_all)
+                if _wants_ai:
+                    await _enrich_rows_with_ai_calls(docs_all)
+                if _wants_e1:
+                    await _enrich_rows_with_enhancement1(docs_all)
                 async def _iter():
                     for d in docs_all:
                         yield d
@@ -2998,8 +3220,11 @@ async def export_interview_reports(
     # Enhancement 2 Session 2 — attach the latest verified AI-call outcome
     # per purpose and the reschedule-link delivery state to each row so the
     # dedicated ai_calling columns can render.
+    # iter162 — Same hoist for the Enhancement 1 candidate-response columns.
     if any(k.startswith("ai_") for k in selected):
         await _enrich_rows_with_ai_calls(docs)
+    if any(k in E1_FIELD_KEYS for k in selected):
+        await _enrich_rows_with_enhancement1(docs)
     seen = set(); rows = []
     for d in docs:
         row = _row(d)
