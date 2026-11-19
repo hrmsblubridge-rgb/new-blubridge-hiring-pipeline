@@ -3008,6 +3008,98 @@ EXPORT_FIELD_CATALOG.extend([
 EXPORT_FIELD_BY_KEY = {e[0]: e for e in EXPORT_FIELD_CATALOG}
 
 
+# iter163 — Walk-in + OTP reversal export columns. All read authoritative
+# bb_registrations / bb_otp_reversal_requests data. No new writes.
+WALKIN_FIELD_KEYS = {
+    "walkin_interview", "walkin_booking_source", "walkin_assigned_slot_ist",
+    "walkin_actual_verification_ist", "walkin_verified_by",
+    "walkin_capacity_override", "otp_verification_current_status",
+    "otp_reversal_requested", "otp_reversal_request_reason",
+    "otp_reversal_request_status", "otp_reversal_requested_by",
+    "otp_reversal_requested_at_ist", "otp_reversal_decision",
+    "otp_reversal_decision_by", "otp_reversal_decision_at_ist",
+    "otp_reversal_admin_remarks", "walkin_hr_review_required",
+}
+
+
+def _current_attendance_status(reg: dict, d: dict) -> str:
+    """Resolve the current OTP attendance status for export."""
+    if (reg.get("otp_verified") in (True, "1", 1)) or (d.get("otp_verified") not in (None, "", False, 0, "0")):
+        return "VERIFIED"
+    if reg.get("reversal_marker"):
+        return "NOT_VERIFIED_ADMIN_REVERSED"
+    if d.get("schedule_date"):
+        return "NOT_VERIFIED"
+    return "NOT_APPLICABLE"
+
+
+async def _enrich_rows_with_walkin(docs: list) -> None:
+    """iter163 — Attach walk-in metadata + the latest correction-request
+    state to each row. Single bb_otp_reversal_requests round-trip grouped by
+    (registration_id, schedule_version)."""
+    # The _e1_reg object (from Enhancement 1 enrichment) already carries the
+    # walk-in fields because they live on bb_registrations. Enrich is only
+    # needed for the reversal-request view.
+    reg_ids = []
+    for d in docs:
+        reg = d.get("_e1_reg") or {}
+        rid = str(reg.get("_id")) if reg.get("_id") else ""
+        if rid:
+            reg_ids.append(rid)
+    latest: dict = {}
+    if reg_ids:
+        async for r in _db.bb_otp_reversal_requests.find(
+            {"registration_id": {"$in": reg_ids}}
+        ).sort("requested_at", -1):
+            rid = r["registration_id"]
+            if rid not in latest:   # only the latest by sort desc
+                latest[rid] = r
+    for d in docs:
+        reg = d.get("_e1_reg") or {}
+        rid = str(reg.get("_id")) if reg.get("_id") else ""
+        d["_walkin_req"] = latest.get(rid) or {}
+
+
+EXPORT_FIELD_CATALOG.extend([
+    ("walkin_interview", "Walk-in Interview", "walkin_otp",
+        ["_e1_reg"], lambda d: "YES" if (d.get("_e1_reg") or {}).get("is_walk_in") else "NO"),
+    ("walkin_booking_source", "Walk-in Booking Source", "walkin_otp",
+        ["_e1_reg"], lambda d: _csv_safe((d.get("_e1_reg") or {}).get("walkin_booking_source") or "")),
+    ("walkin_assigned_slot_ist", "Walk-in Assigned Interview Slot (IST)", "walkin_otp",
+        ["_e1_reg"], lambda d: (d.get("_e1_reg") or {}).get("walkin_assigned_slot_ist") or ""),
+    ("walkin_actual_verification_ist", "Walk-in Actual Verification Time (IST)", "walkin_otp",
+        ["_e1_reg"], lambda d: _format_iso_dt_ist((d.get("_e1_reg") or {}).get("walkin_actual_verification_at") or "")),
+    ("walkin_verified_by", "Walk-in Verified By", "walkin_otp",
+        ["_e1_reg"], lambda d: _csv_safe((d.get("_e1_reg") or {}).get("walkin_employee_username") or "")),
+    ("walkin_capacity_override", "Walk-in Capacity Override", "walkin_otp",
+        ["_e1_reg"], lambda d: "YES" if (d.get("_e1_reg") or {}).get("walkin_capacity_override") else "NO"),
+    ("walkin_hr_review_required", "Walk-in HR Review Required", "walkin_otp",
+        ["_e1_reg"], lambda d: "YES" if (d.get("_e1_reg") or {}).get("walkin_hr_review_required") else "NO"),
+    ("otp_verification_current_status", "OTP Verification Current Status", "walkin_otp",
+        ["_e1_reg", "otp_verified"], lambda d: _current_attendance_status(d.get("_e1_reg") or {}, d)),
+    ("otp_reversal_requested", "OTP Reversal Requested", "walkin_otp",
+        ["_walkin_req"], lambda d: "YES" if (d.get("_walkin_req") or {}).get("status") else "NO"),
+    ("otp_reversal_request_reason", "OTP Reversal Request Reason", "walkin_otp",
+        ["_walkin_req"], lambda d: _csv_safe(((d.get("_walkin_req") or {}).get("reason_text") or "")
+                                              or ((d.get("_walkin_req") or {}).get("reason_code") or ""))),
+    ("otp_reversal_request_status", "OTP Reversal Request Status", "walkin_otp",
+        ["_walkin_req"], lambda d: (d.get("_walkin_req") or {}).get("status") or "NOT APPLICABLE"),
+    ("otp_reversal_requested_by", "OTP Reversal Requested By", "walkin_otp",
+        ["_walkin_req"], lambda d: _csv_safe((d.get("_walkin_req") or {}).get("requested_by_username") or "")),
+    ("otp_reversal_requested_at_ist", "OTP Reversal Requested At (IST)", "walkin_otp",
+        ["_walkin_req"], lambda d: _format_iso_dt_ist((d.get("_walkin_req") or {}).get("requested_at") or "")),
+    ("otp_reversal_decision", "OTP Reversal Decision", "walkin_otp",
+        ["_walkin_req"], lambda d: ((d.get("_walkin_req") or {}).get("status") if (d.get("_walkin_req") or {}).get("status") in ("APPROVED", "REJECTED", "OBSOLETE") else "")),
+    ("otp_reversal_decision_by", "OTP Reversal Decision By", "walkin_otp",
+        ["_walkin_req"], lambda d: _csv_safe((d.get("_walkin_req") or {}).get("reviewed_by_username") or "")),
+    ("otp_reversal_decision_at_ist", "OTP Reversal Decision At (IST)", "walkin_otp",
+        ["_walkin_req"], lambda d: _format_iso_dt_ist((d.get("_walkin_req") or {}).get("reviewed_at") or "")),
+    ("otp_reversal_admin_remarks", "OTP Reversal Admin Remarks", "walkin_otp",
+        ["_walkin_req"], lambda d: _csv_safe((d.get("_walkin_req") or {}).get("admin_remarks") or "")),
+])
+EXPORT_FIELD_BY_KEY = {e[0]: e for e in EXPORT_FIELD_CATALOG}
+
+
 def _export_projection_for(field_keys):
     """Build a Mongo $project dict including all DB keys required by selected fields."""
     needed = {"_id": 0}
@@ -3061,29 +3153,29 @@ async def get_interview_reports_export_fields(
         "ai_calling": {"id": "ai_calling", "label": "AI Calling Fields", "fields": []},
         "candidate_responses": {"id": "candidate_responses",
                                 "label": "Candidate Responses (Enhancement 1)", "fields": []},
+        "walkin_otp": {"id": "walkin_otp",
+                       "label": "Walk-in & OTP Reversal (iter163)", "fields": []},
     }
-    # AI Calling + Candidate Responses columns rely on `bb_registrations` /
-    # `ai_candidate_consents` (NOT on pipeline_data keys), so a sample-based
-    # intersection would hide them on datasets with no call history yet. We
-    # surface both sections unconditionally; empty cells are rendered as "".
+    # Several sections depend on auxiliary collections (bb_registrations /
+    # ai_candidate_consents / bb_otp_reversal_requests), not on pipeline_data
+    # keys, so a sample-based intersection would hide them when no history
+    # exists yet. We surface all three unconditionally.
     _unconditional_section_keys = set()
     for key, label, section, db_keys, _extractor in EXPORT_FIELD_CATALOG:
-        if section in ("ai_calling", "candidate_responses"):
+        if section in ("ai_calling", "candidate_responses", "walkin_otp"):
             sections_map[section]["fields"].append({"key": key, "label": label})
             _unconditional_section_keys.add(key)
     for key, label, section, db_keys, _extractor in EXPORT_FIELD_CATALOG:
         if key in _unconditional_section_keys:
             continue
-        # Always include the field if catalog says so AND at least one underlying
-        # DB key is present in the sample. If the dataset is empty we still show
-        # the catalog so the modal doesn't appear broken — backend later returns 404.
         if cnt > 0 and not any(k in present_keys for k in db_keys):
             continue
         sections_map[section]["fields"].append({"key": key, "label": label})
 
     return {
         "sections": [sections_map["registration"], sections_map["interview"],
-                     sections_map["ai_calling"], sections_map["candidate_responses"]],
+                     sections_map["ai_calling"], sections_map["candidate_responses"],
+                     sections_map["walkin_otp"]],
         "total_matching": cnt,
     }
 
@@ -3153,7 +3245,8 @@ async def export_interview_reports(
     # before streaming starts.
     _wants_ai = any(k.startswith("ai_") for k in selected)
     _wants_e1 = any(k in E1_FIELD_KEYS for k in selected)
-    _needs_hoist = _wants_ai or _wants_e1
+    _wants_walkin = any(k in WALKIN_FIELD_KEYS for k in selected)
+    _needs_hoist = _wants_ai or _wants_e1 or _wants_walkin
 
     if format == "csv":
         # True streaming CSV with gzip compression — keeps the K8s 60 s ingress
@@ -3169,8 +3262,10 @@ async def export_interview_reports(
                 docs_all = await src.aggregate(pipeline, allowDiskUse=True).to_list(None)
                 if _wants_ai:
                     await _enrich_rows_with_ai_calls(docs_all)
-                if _wants_e1:
+                if _wants_e1 or _wants_walkin:
                     await _enrich_rows_with_enhancement1(docs_all)
+                if _wants_walkin:
+                    await _enrich_rows_with_walkin(docs_all)
                 async def _iter():
                     for d in docs_all:
                         yield d
@@ -3223,8 +3318,12 @@ async def export_interview_reports(
     # iter162 — Same hoist for the Enhancement 1 candidate-response columns.
     if any(k.startswith("ai_") for k in selected):
         await _enrich_rows_with_ai_calls(docs)
-    if any(k in E1_FIELD_KEYS for k in selected):
+    _xlsx_wants_e1 = any(k in E1_FIELD_KEYS for k in selected)
+    _xlsx_wants_walkin = any(k in WALKIN_FIELD_KEYS for k in selected)
+    if _xlsx_wants_e1 or _xlsx_wants_walkin:
         await _enrich_rows_with_enhancement1(docs)
+    if _xlsx_wants_walkin:
+        await _enrich_rows_with_walkin(docs)
     seen = set(); rows = []
     for d in docs:
         row = _row(d)

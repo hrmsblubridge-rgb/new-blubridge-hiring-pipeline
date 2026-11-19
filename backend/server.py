@@ -4553,6 +4553,10 @@ try:
     init_bb(db, get_current_user, _build_college_rank_lookup, _classify_college)
     app.include_router(bb_router)
     app.include_router(pub_router)
+    # iter163 — Manual OTP Verification enhancements (undo + walk-in).
+    from bb_walkin import walkin_router, init_walkin
+    init_walkin(db, get_current_user)
+    app.include_router(walkin_router)
 except Exception:
     import traceback
     traceback.print_exc()

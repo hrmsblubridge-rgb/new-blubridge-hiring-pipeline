@@ -70,6 +70,36 @@ export default function ManualOtpVerify() {
     const [verifying, setVerifying] = useState(false);
     const [applicant, setApplicant] = useState(null);  // lookup payload
     const [verified, setVerified] = useState(null);    // post-verify applicant payload
+    // iter163 — Undo + walk-in modal state.
+    const [undoModal, setUndoModal] = useState({ open: false, reason: '', text: '' });
+    const [walkInModal, setWalkInModal] = useState({ open: false, presenceConfirmed: false, chennaiConfirmed: false });
+
+    const submitUndoRequest = async () => {
+        try {
+            await axios.post(`${API}/api/bb/manual-otp/reversal-requests`, {
+                registration_id: applicant.id || applicant._id,
+                reason_code: undoModal.reason,
+                reason_text: undoModal.text,
+            }, { withCredentials: true });
+            toast.success('Correction request submitted for admin review');
+            setUndoModal({ open: false, reason: '', text: '' });
+        } catch (err) { toast.error(err?.response?.data?.detail || 'Submission failed'); }
+    };
+
+    const submitWalkIn = async () => {
+        try {
+            const r = await axios.post(`${API}/api/bb/manual-otp/walk-in`, {
+                registration_id: applicant.id || applicant._id,
+                physical_presence_confirmed: !!walkInModal.presenceConfirmed,
+                chennai_availability_confirmed: !!walkInModal.chennaiConfirmed,
+                accept_capacity_override: true,
+            }, { withCredentials: true });
+            toast.success(`Walk-in verified · slot ${r.data.assigned_interview_slot_ist}`);
+            setWalkInModal({ open: false });
+            // Re-fetch to show the new verified state.
+            if (applicant.email || applicant.phone) selectApplicant({ email: applicant.email, phone: applicant.phone });
+        } catch (err) { toast.error(err?.response?.data?.detail || 'Walk-in failed'); }
+    };
 
     const selectApplicant = async (card) => {
         setLoadingDetail(true);
@@ -318,10 +348,20 @@ export default function ManualOtpVerify() {
                         {/* iter82 — Always-enabled Verify + optional Reschedule & Verify */}
                         <div className="px-5 py-4 border-t border-[#ece9dc] bg-[#faf9f1] flex flex-wrap gap-3">
                             {applicant.otp_verified ? (
-                                <div className="flex items-center gap-2 text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-sm font-semibold w-full"
-                                    data-testid="manual-otp-status-already-verified">
-                                    <CheckCircle size={18} weight="fill" />
-                                    Applicant has already verified their OTP !
+                                <div className="w-full">
+                                    <div className="flex items-center gap-2 text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-sm font-semibold"
+                                        data-testid="manual-otp-status-already-verified">
+                                        <CheckCircle size={18} weight="fill" />
+                                        Applicant has already verified their OTP !
+                                    </div>
+                                    {/* iter163 — Request Undo Verification (Feature A). Opens a
+                                        mandatory-reason modal; backend enforces the per-feature
+                                        permission flag `can_request_otp_reversal`. */}
+                                    <button onClick={() => setUndoModal({ open: true, reason: '', text: '' })}
+                                        data-testid="manual-otp-undo-btn"
+                                        className="mt-3 px-4 py-2 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold text-sm flex items-center gap-2">
+                                        <ArrowLeftIcon size={14} weight="bold" /> Request Undo Verification
+                                    </button>
                                 </div>
                             ) : rescheduling ? (
                                 <>
@@ -346,8 +386,81 @@ export default function ManualOtpVerify() {
                                             <Clock size={16} weight="bold" /> Reschedule & Verify
                                         </button>
                                     )}
+                                    {/* iter163 — Schedule & Verify Walk-in (Feature B). Backend
+                                        enforces `can_schedule_walkin`, candidate eligibility
+                                        (shortlisted, not withdrawn, chennai YES), and the
+                                        IST slot calculation. */}
+                                    <button onClick={() => setWalkInModal({ open: true, chennaiConfirmed: applicant.chennai_availability_latest === false, capacityOverride: false })}
+                                        data-testid="manual-otp-walkin-btn"
+                                        className="px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm flex items-center gap-2">
+                                        <ShieldCheck size={16} weight="bold" /> Schedule &amp; Verify Walk-in
+                                    </button>
                                 </>
                             )}
+                        </div>
+                    </div>
+                )}
+                {/* iter163 — Undo modal */}
+                {undoModal.open && (
+                    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" data-testid="manual-otp-undo-modal">
+                        <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4">
+                            <h3 className="font-semibold text-[#1a2332]">Request Undo Verification</h3>
+                            <p className="text-xs text-[#6b7280]">Attendance stays VERIFIED until a top-level admin reviews. Reason is required.</p>
+                            <select value={undoModal.reason} onChange={e => setUndoModal({ ...undoModal, reason: e.target.value })}
+                                data-testid="manual-otp-undo-reason"
+                                className="w-full border border-[#e5e3d8] rounded-lg px-3 py-2 text-sm">
+                                <option value="">Select reason…</option>
+                                <option value="wrong_candidate">Wrong candidate verified</option>
+                                <option value="accidental">Attendance verified accidentally</option>
+                                <option value="not_present">Candidate not physically present</option>
+                                <option value="incorrect_record">Incorrect verification record</option>
+                                <option value="other">Other — specify below</option>
+                            </select>
+                            {undoModal.reason === 'other' && (
+                                <textarea value={undoModal.text} onChange={e => setUndoModal({ ...undoModal, text: e.target.value })}
+                                    data-testid="manual-otp-undo-text"
+                                    placeholder="Explain the correction…" rows={3}
+                                    className="w-full border border-[#e5e3d8] rounded-lg px-3 py-2 text-sm" />
+                            )}
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button onClick={() => setUndoModal({ open: false, reason: '', text: '' })}
+                                    data-testid="manual-otp-undo-cancel"
+                                    className="px-3 py-2 rounded-lg border border-[#e5e3d8] text-sm">Cancel</button>
+                                <button onClick={submitUndoRequest} disabled={!undoModal.reason || (undoModal.reason === 'other' && !undoModal.text.trim())}
+                                    data-testid="manual-otp-undo-submit"
+                                    className="px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-sm disabled:opacity-50">Submit Request</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                {/* iter163 — Walk-in modal */}
+                {walkInModal.open && (
+                    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" data-testid="manual-otp-walkin-modal">
+                        <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4">
+                            <h3 className="font-semibold text-[#1a2332]">Schedule &amp; Verify Walk-in</h3>
+                            <p className="text-xs text-[#6b7280]">Today's IST slot will be auto-assigned (10:00–17:00, 30-min granularity). You must confirm physical presence.</p>
+                            <label className="flex items-start gap-2 text-sm">
+                                <input type="checkbox" checked={walkInModal.presenceConfirmed}
+                                    onChange={e => setWalkInModal({ ...walkInModal, presenceConfirmed: e.target.checked })}
+                                    data-testid="manual-otp-walkin-presence" className="mt-1" />
+                                <span>Candidate is physically present at Chennai office right now.</span>
+                            </label>
+                            {applicant?.chennai_availability_latest === false && (
+                                <label className="flex items-start gap-2 text-sm">
+                                    <input type="checkbox" checked={walkInModal.chennaiConfirmed}
+                                        onChange={e => setWalkInModal({ ...walkInModal, chennaiConfirmed: e.target.checked })}
+                                        data-testid="manual-otp-walkin-chennai" className="mt-1" />
+                                    <span>Candidate previously answered NO to Chennai availability — confirm the new YES.</span>
+                                </label>
+                            )}
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button onClick={() => setWalkInModal({ open: false })}
+                                    data-testid="manual-otp-walkin-cancel"
+                                    className="px-3 py-2 rounded-lg border border-[#e5e3d8] text-sm">Cancel</button>
+                                <button onClick={submitWalkIn} disabled={!walkInModal.presenceConfirmed}
+                                    data-testid="manual-otp-walkin-submit"
+                                    className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm disabled:opacity-50">Confirm Walk-in</button>
+                            </div>
                         </div>
                     </div>
                 )}
