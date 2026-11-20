@@ -181,6 +181,11 @@ class ReversalDecisionBody(BaseModel):
     remarks: Optional[str] = ""
 
 
+class AdminRevokeBody(BaseModel):
+    registration_id: str
+    remarks: Optional[str] = ""
+
+
 class WalkInBody(BaseModel):
     registration_id: str
     physical_presence_confirmed: bool = Field(..., description="Must be true")
@@ -397,6 +402,97 @@ async def reject_reversal(request_id: str, data: ReversalDecisionBody, request: 
         {"request_id": request_id, "remarks": (data.remarks or "").strip()}
     )
     return {"success": True, "request_id": request_id, "status": "REJECTED"}
+
+
+@walkin_router.get("/me")
+async def who_am_i(request: Request):
+    """Return the caller's username + effective permission flags so the
+    frontend can conditionally render admin-only actions (e.g. the direct
+    revoke button). All checks are still re-enforced server-side."""
+    p = await _principal_from_request(request)
+    return {"username": p["username"], "role": p.get("role"), "permissions": p["perms"]}
+
+
+@walkin_router.post("/admin-revoke")
+async def admin_revoke_attendance(data: AdminRevokeBody, request: Request):
+    """iter163b — Admin-initiated attendance reversal. Bypasses the
+    employee-submit → admin-approve two-step when the admin already knows
+    attendance was recorded in error. Still writes an auditable
+    bb_otp_reversal_requests doc (marked APPROVED with
+    `request_source='admin_direct'`) so the export + audit trail stays
+    uniform. Same atomic flip as approve_reversal: otp_verified→False,
+    otp_state=reversed, reversal_marker=True. Original OTP preserved for
+    same-booking reuse per Q4.7; never exposed."""
+    p = await _principal_from_request(request)
+    _require(p, TOP_LEVEL_ADMIN_FLAG)
+
+    try:
+        reg_oid = ObjectId(data.registration_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid registration_id")
+
+    reg = await _db.bb_registrations.find_one({"_id": reg_oid})
+    if not reg:
+        raise HTTPException(status_code=404, detail="Registration not found")
+    if reg.get("otp_verified") not in (True, "1", 1):
+        raise HTTPException(status_code=409, detail="This registration is not currently OTP-verified")
+
+    current_sv = int(reg.get("schedule_version") or 1)
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Insert the correction-request record marked APPROVED up front so the
+    # audit chain + export always goes through the same shape.
+    req_doc = {
+        "registration_id": str(reg_oid),
+        "schedule_version": current_sv,
+        "reason_code": "admin_direct_revoke",
+        "reason_text": (data.remarks or "").strip() or "Admin direct revoke",
+        "status": "APPROVED",
+        "request_source": "admin_direct",
+        "requested_by_username": p["username"],
+        "requested_by_user_id": p["user_id"],
+        "requested_at": now,
+        "reviewed_at": now,
+        "reviewed_by_username": p["username"],
+        "admin_remarks": (data.remarks or "").strip(),
+    }
+    r = await _db.bb_otp_reversal_requests.insert_one(req_doc)
+    req_id = str(r.inserted_id)
+
+    # Atomic flip with concurrency guard on schedule_version.
+    flip = await _db.bb_registrations.update_one(
+        {"_id": reg_oid, "otp_verified": {"$in": [True, "1", 1]},
+         "schedule_version": current_sv},
+        {"$set": {"otp_verified": False, "otp_state": "reversed",
+                  "status": "Interview Scheduled",
+                  "reversal_marker": True, "reversal_marker_at": now,
+                  "last_update": now}}
+    )
+    if flip.matched_count == 0:
+        await _db.bb_otp_reversal_requests.update_one(
+            {"_id": r.inserted_id},
+            {"$set": {"status": "OBSOLETE",
+                      "admin_remarks": "Concurrent change — revoke no-op"}}
+        )
+        raise HTTPException(status_code=409, detail="Concurrent change detected; retry after refresh")
+
+    await _db.pipeline_data.update_many(
+        {"$or": [{"phone": reg.get("phone", "")}, {"email": reg.get("email", "")}]},
+        {"$set": {"otp_verified": "", "status": "Interview Scheduled",
+                  "reversal_marker": True, "last_update": now}}
+    )
+
+    evt = await _write_audit(
+        "REVERSAL_APPROVED", p, str(reg_oid), current_sv,
+        {"request_id": req_id, "source": "admin_direct",
+         "remarks": (data.remarks or "").strip()}
+    )
+    await _db.bb_otp_reversal_requests.update_one(
+        {"_id": r.inserted_id},
+        {"$set": {"reversal_event_id": evt}}
+    )
+    return {"success": True, "request_id": req_id, "status": "APPROVED",
+            "reversal_event_id": evt, "source": "admin_direct"}
 
 
 # ── Feature B — Schedule & Verify Walk-in ─────────────────────────────────

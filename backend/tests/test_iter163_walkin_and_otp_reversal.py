@@ -458,3 +458,67 @@ def test_approved_reversal_permits_same_otp_reuse_same_booking():
         assert reg2["otp_verified"] is False
         assert reg2["schedule_version"] == 1  # same booking
     run(case)
+
+
+# ─── iter163b — Admin direct-revoke ───────────────────────────────────────
+
+def test_me_endpoint_returns_effective_perms():
+    async def case(tc, d, u):
+        r = await tc.get("/api/bb/manual-otp/me", headers=_hdr(u["admin"]))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["username"] == u["admin"]["username"]
+        assert body["permissions"]["can_approve_otp_reversal"] is True
+        r2 = await tc.get("/api/bb/manual-otp/me", headers=_hdr(u["employee"]))
+        body2 = r2.json()
+        assert body2["permissions"]["can_approve_otp_reversal"] is False
+    run(case)
+
+
+def test_admin_direct_revoke_flips_attendance():
+    async def case(tc, d, u):
+        reg = await _mk_reg(d, verified=True)
+        r = await tc.post("/api/bb/manual-otp/admin-revoke",
+                          json={"registration_id": str(reg["_id"]),
+                                "remarks": "verified in error"},
+                          headers=_hdr(u["admin"]))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "APPROVED"
+        assert body["source"] == "admin_direct"
+        reg2 = await d.bb_registrations.find_one({"_id": reg["_id"]})
+        assert reg2["otp_verified"] is False
+        assert reg2["otp_state"] == "reversed"
+        assert reg2["reversal_marker"] is True
+        # Original OTP preserved for same-booking reuse.
+        assert reg2["otp"] == "123456"
+        # Correction request record present and marked admin_direct.
+        req = await d.bb_otp_reversal_requests.find_one({"registration_id": str(reg["_id"])})
+        assert req["request_source"] == "admin_direct"
+        assert req["status"] == "APPROVED"
+        # Audit event logged.
+        kinds = [e["event_type"] async for e in d.bb_verification_events.find({"registration_id": str(reg["_id"])})]
+        assert "REVERSAL_APPROVED" in kinds
+    run(case)
+
+
+def test_admin_direct_revoke_unauthorized_employee_blocked():
+    async def case(tc, d, u):
+        reg = await _mk_reg(d, verified=True)
+        r = await tc.post("/api/bb/manual-otp/admin-revoke",
+                          json={"registration_id": str(reg["_id"])},
+                          headers=_hdr(u["employee"]))
+        assert r.status_code == 403
+        reg2 = await d.bb_registrations.find_one({"_id": reg["_id"]})
+        assert reg2["otp_verified"] is True  # unchanged
+    run(case)
+
+
+def test_admin_direct_revoke_requires_currently_verified():
+    async def case(tc, d, u):
+        reg = await _mk_reg(d, verified=False)  # not yet verified
+        r = await tc.post("/api/bb/manual-otp/admin-revoke",
+                          json={"registration_id": str(reg["_id"])},
+                          headers=_hdr(u["admin"]))
+        assert r.status_code == 409
+    run(case)

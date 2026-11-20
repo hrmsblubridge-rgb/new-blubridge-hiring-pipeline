@@ -73,6 +73,27 @@ export default function ManualOtpVerify() {
     // iter163 — Undo + walk-in modal state.
     const [undoModal, setUndoModal] = useState({ open: false, reason: '', text: '' });
     const [walkInModal, setWalkInModal] = useState({ open: false, presenceConfirmed: false, chennaiConfirmed: false });
+    // iter163b — Admin direct revoke state + the caller's effective perms.
+    const [myPerms, setMyPerms] = useState({});
+    const [adminRevokeModal, setAdminRevokeModal] = useState({ open: false, remarks: '' });
+
+    useEffect(() => {
+        axios.get(`${API}/api/bb/manual-otp/me`, { withCredentials: true })
+            .then(r => setMyPerms(r.data?.permissions || {}))
+            .catch(() => setMyPerms({}));
+    }, []);
+
+    const submitAdminRevoke = async () => {
+        try {
+            await axios.post(`${API}/api/bb/manual-otp/admin-revoke`, {
+                registration_id: applicant.id || applicant._id,
+                remarks: adminRevokeModal.remarks,
+            }, { withCredentials: true });
+            toast.success('Attendance revoked');
+            setAdminRevokeModal({ open: false, remarks: '' });
+            if (applicant.email || applicant.phone) selectApplicant({ email: applicant.email, phone: applicant.phone });
+        } catch (err) { toast.error(err?.response?.data?.detail || 'Revoke failed'); }
+    };
 
     const submitUndoRequest = async () => {
         try {
@@ -362,6 +383,15 @@ export default function ManualOtpVerify() {
                                         className="mt-3 px-4 py-2 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold text-sm flex items-center gap-2">
                                         <ArrowLeftIcon size={14} weight="bold" /> Request Undo Verification
                                     </button>
+                                    {/* iter163b — Admin direct revoke. Only shown when the caller
+                                        has can_approve_otp_reversal; backend 403s anyone else. */}
+                                    {myPerms.can_approve_otp_reversal && (
+                                        <button onClick={() => setAdminRevokeModal({ open: true, remarks: '' })}
+                                            data-testid="manual-otp-admin-revoke-btn"
+                                            className="mt-3 ml-2 px-4 py-2 rounded-lg border border-red-300 bg-red-50 hover:bg-red-100 text-red-800 font-semibold text-sm flex items-center gap-2">
+                                            <ArrowLeftIcon size={14} weight="bold" /> Admin: Revoke Attendance
+                                        </button>
+                                    )}
                                 </div>
                             ) : rescheduling ? (
                                 <>
@@ -429,6 +459,34 @@ export default function ManualOtpVerify() {
                                 <button onClick={submitUndoRequest} disabled={!undoModal.reason || (undoModal.reason === 'other' && !undoModal.text.trim())}
                                     data-testid="manual-otp-undo-submit"
                                     className="px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-sm disabled:opacity-50">Submit Request</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                {/* iter163b — Admin direct-revoke modal */}
+                {adminRevokeModal.open && (
+                    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" data-testid="manual-otp-admin-revoke-modal">
+                        <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4">
+                            <h3 className="font-semibold text-red-700">Revoke Attendance?</h3>
+                            <p className="text-xs text-[#6b7280]">
+                                Admin direct action. Attendance flips to NOT VERIFIED immediately.
+                                The original OTP stays valid for same-booking re-verification per policy.
+                                A separate audit event is recorded.
+                            </p>
+                            <textarea value={adminRevokeModal.remarks}
+                                onChange={e => setAdminRevokeModal({ ...adminRevokeModal, remarks: e.target.value })}
+                                data-testid="manual-otp-admin-revoke-remarks"
+                                placeholder="Optional remarks for audit log…" rows={3}
+                                className="w-full border border-[#e5e3d8] rounded-lg px-3 py-2 text-sm" />
+                            <div className="flex justify-end gap-2">
+                                <button onClick={() => setAdminRevokeModal({ open: false, remarks: '' })}
+                                    data-testid="manual-otp-admin-revoke-cancel"
+                                    className="px-3 py-2 rounded-lg border border-[#e5e3d8] text-sm">Cancel</button>
+                                <button onClick={submitAdminRevoke}
+                                    data-testid="manual-otp-admin-revoke-confirm"
+                                    className="px-3 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm">
+                                    Confirm Revoke
+                                </button>
                             </div>
                         </div>
                     </div>
