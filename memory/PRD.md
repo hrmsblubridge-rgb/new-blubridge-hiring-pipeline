@@ -19,6 +19,19 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - [x] Mock-only safety net preserved (`AI_CALLING_ENABLED=false`, Emergency Stop ON, `hiring_ai_testing` only)
 
 ## CHANGELOG
+### 2026-02-?? — Mailing restored (ENABLE_EMAIL / ENABLE_WHATSAPP flip)
+
+**Issue**: Neither candidates nor allowlisted testers received email/WhatsApp. Root cause = `ENABLE_EMAIL="false"` and `ENABLE_WHATSAPP="false"` in `/app/backend/.env` — `send_email()` and `send_whatsapp()` short-circuit on `_is_enabled(...)` before touching Resend / AiSensy.
+
+**Fix**: Flipped both flags to `"true"` in preview `backend/.env`. No code changes. `TEST_MODE=true` preserved so the gate still blocks everyone outside `bb_test_credentials`. `RESEND_API_KEY` already set.
+
+**Live verification** (sent via `messaging.notify_shortlisted(...)` to the user-provided test contact `rishi.nayak@blubridge.com` / `9443109903`, already on the tester allowlist):
+- Resend 200 OK — email id `01a1f930-48d5-78ee-8895-eb6f80fb59de`
+- AiSensy 200 OK — submitted_message_id `4e23b7a7-a67e-46fc-9663-d6f40caf9877`
+- Gate reason: `test_mode:tester_allowed` (both channels)
+
+**Production note**: Render env must mirror these flags for mail to send in production.
+
 ### 2026-02-15 — Team Score iter160: Admin Import Review delete, email column merge, sortable headers with 2-line wrap + full-title tooltips
 
 **Backend (`backend/team_score.py`)**
