@@ -334,5 +334,12 @@ async def rotate_webhook_token(request: Request):
     await db().ai_provider_settings.update_one({"_id": DOC_ID}, {"$set": {
         "webhook_token_hash": hashlib.sha256(token.encode()).hexdigest(), "webhook_token_set_at": now_iso()}}, upsert=True)
     await _audit(request, user, "webhook_token_rotated", ["webhook_token"], (await _doc()).get("config_version", 0))
-    base = os.environ.get("FRONTEND_URL", "").rstrip("/")
-    return {"webhook_url": f"{base}/api/ai-calling/webhook/bolna/{token}", "shown_once": True}
+    # iter165 — Use the shared URL resolver so webhook URLs honour
+    # PUBLIC_BASE_URL in prod (same precedence used for candidate links).
+    try:
+        from messaging import build_public_url as _bpu
+        webhook_url = _bpu(f"/api/ai-calling/webhook/bolna/{token}")
+    except Exception:
+        base = os.environ.get("FRONTEND_URL", "").rstrip("/")
+        webhook_url = f"{base}/api/ai-calling/webhook/bolna/{token}"
+    return {"webhook_url": webhook_url, "shown_once": True}

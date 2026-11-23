@@ -556,6 +556,22 @@ def build_public_url(path: str) -> str:
     base = (os.environ.get("PUBLIC_BASE_URL") or os.environ.get("FRONTEND_URL") or FRONTEND_URL or "").rstrip("/")
     leaf = (path or "").lstrip("/")
     url = f"{base}/{leaf}" if base else f"/{leaf}"
+    # iter165 — Production safety guard. When TEST_MODE is off (i.e. real
+    # candidates receive this link) but the resolved base is still a
+    # preview / development host, emit a loud WARN so the first outbound
+    # send in prod with mis-configured env is immediately visible in logs.
+    # We never silently rewrite — ops must fix PUBLIC_BASE_URL / FRONTEND_URL
+    # on the hosting dashboard. Candidates still receive whatever env says.
+    try:
+        _preview_markers = (".preview.emergentagent.com", "localhost", "127.0.0.1")
+        if (not is_test_mode()) and any(m in base for m in _preview_markers):
+            _logger.error(
+                f"[LINK:PROD_URL_LEAK] TEST_MODE=false but base_url={base!r} "
+                f"looks like a preview/dev host. Candidate link emitted: {url}. "
+                f"Fix PUBLIC_BASE_URL (or FRONTEND_URL) on the production host."
+            )
+    except Exception:
+        pass
     if is_test_mode():
         _src = "PUBLIC_BASE_URL" if os.environ.get("PUBLIC_BASE_URL") else "FRONTEND_URL"
         _logger.info(f"[LINK DEBUG] base_url_source={_src} generated_url={url}")
