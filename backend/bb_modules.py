@@ -2612,10 +2612,55 @@ async def export_missing_applicants(
     if not docs:
         raise HTTPException(status_code=404, detail="No data available to export")
 
+    # ------------------------------------------------------------------
+    # iter164 — Interview Scheduling Link column (READ-ONLY).
+    # Pulls the existing per-candidate `schedule_token` from
+    # `bb_registrations` (the authoritative WhatsApp/email schedule-link
+    # source). No tokens are generated / refreshed / mutated. Rows with
+    # no stored token display the literal string "NOT AVAILABLE".
+    # ------------------------------------------------------------------
+    from messaging import build_public_url as _build_public_url
+
+    _emails = {(d.get("email") or "").strip().lower() for d in docs if d.get("email")}
+    _emails.discard("")
+    _reg_token_by_email: dict = {}
+    if _emails:
+        reg_cursor = _db.bb_registrations.find(
+            {
+                "email": {"$in": list(_emails)},
+                "schedule_token": {"$nin": [None, ""], "$exists": True},
+                "superseded": {"$ne": True},
+            },
+            {"_id": 0, "email": 1, "schedule_token": 1, "registered_at": 1,
+             "last_update": 1, "schedule_date": 1},
+        )
+        async for r in reg_cursor:
+            e = (r.get("email") or "").strip().lower()
+            if not e:
+                continue
+            tok = (r.get("schedule_token") or "").strip()
+            if not tok:
+                continue
+            # Prefer the most-recently updated registration if more than one row
+            # matches (defensive — `superseded: != True` should already narrow
+            # it to one, but we keep a deterministic tie-breaker).
+            recency = str(r.get("last_update") or r.get("registered_at") or r.get("schedule_date") or "")
+            prev = _reg_token_by_email.get(e)
+            if (prev is None) or (recency > prev[1]):
+                _reg_token_by_email[e] = (tok, recency)
+
+    def _schedule_link_for(doc) -> str:
+        e = (doc.get("email") or "").strip().lower()
+        entry = _reg_token_by_email.get(e)
+        if not entry:
+            return "NOT AVAILABLE"
+        return _build_public_url(f"/schedule-interview/{entry[0]}")
+
     headers = [
         "Name", "Email", "Phone", "Current Location", "Job Role", "College",
         "College Type", "Degree", "Course", "Registered Date",
         "Scheduled Date", "Schedule Time", "Result Status",
+        "Interview Scheduling Link",
     ]
 
     def _row(d):
@@ -2635,6 +2680,7 @@ async def export_missing_applicants(
             _format_date_ddmmyyyy(d.get("schedule_date") or "").replace("/", "-"),
             _format_time_12h(d.get("schedule_time") or ""),
             _missing_status(d),
+            _schedule_link_for(d),
         ]
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -2657,8 +2703,20 @@ async def export_missing_applicants(
     wb = Workbook(write_only=True)
     ws = wb.create_sheet("Missing Applicants")
     ws.append(headers)
+    # iter164 — Emit the Interview Scheduling Link as a clickable Excel
+    # hyperlink when a real URL is present; keep "NOT AVAILABLE" as plain
+    # text so it is not mis-rendered as a link.
+    from openpyxl.cell import WriteOnlyCell  # local import — write-only ws
+    link_col_idx = len(headers) - 1  # last column
     for d in docs:
-        ws.append(_row(d))
+        row_vals = _row(d)
+        link_val = row_vals[link_col_idx]
+        if isinstance(link_val, str) and link_val.startswith(("http://", "https://")):
+            cell = WriteOnlyCell(ws, value=link_val)
+            cell.hyperlink = link_val
+            cell.style = "Hyperlink"
+            row_vals[link_col_idx] = cell
+        ws.append(row_vals)
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
