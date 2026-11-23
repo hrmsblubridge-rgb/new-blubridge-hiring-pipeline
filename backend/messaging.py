@@ -24,7 +24,14 @@ AISENSY_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY5NDI0MTYwNzA4
 # fresh from Render; only the from-email/from-name carry safe defaults
 # so deploys without overrides keep working out-of-box.
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
-RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "information.team@blubrg.com").strip()
+# iter166 — Accept either `RESEND_FROM_EMAIL` (historic) or `FROM_EMAIL`
+# (what the hosting dashboard now exposes). Read fresh on every send so
+# a Render env update takes effect without a cold restart.
+RESEND_FROM_EMAIL = (
+    os.environ.get("RESEND_FROM_EMAIL")
+    or os.environ.get("FROM_EMAIL")
+    or "information.team@blubrg.com"
+).strip()
 RESEND_FROM_NAME = os.environ.get("RESEND_FROM_NAME", "BluBridge Hiring").strip()
 # iter119 — Reply-To routing. Applicant clicks Reply in their mail client →
 # the reply automatically targets the recruitment inbox below, NOT the sender
