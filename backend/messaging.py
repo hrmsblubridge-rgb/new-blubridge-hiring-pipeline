@@ -452,7 +452,23 @@ async def send_email(to_email: str, phone: str, subject: str, html_body: str, is
         )
 
     try:
-        if not RESEND_API_KEY:
+        # iter169 — Read mail env FRESH per call (not module-level). Previously
+        # `RESEND_API_KEY / RESEND_FROM_EMAIL / RESEND_FROM_NAME / MAIL_REPLY_TO`
+        # were captured at import-time. If an operator updated `.env` (or
+        # platform secrets) without restarting the backend process, the next
+        # outbound mail silently kept using the stale cached values — which
+        # is exactly the "From shows the old sender" bug we hit. Reading at
+        # send time removes that class of staleness entirely.
+        _api_key = (os.environ.get("RESEND_API_KEY") or "").strip()
+        _from_email = (
+            os.environ.get("RESEND_FROM_EMAIL")
+            or os.environ.get("FROM_EMAIL")
+            or "information.team@blubrg.com"
+        ).strip()
+        _from_name = os.environ.get("RESEND_FROM_NAME", "BluBridge Hiring").strip()
+        _reply_to = (os.environ.get("MAIL_REPLY_TO") or "hiring@blubridge.com").strip()
+
+        if not _api_key:
             _logger.error(
                 f"[Email:FAIL] stage=config RESEND_API_KEY missing — set it on Render. "
                 f"to={to_email} subject={subject}"
@@ -464,8 +480,8 @@ async def send_email(to_email: str, phone: str, subject: str, html_body: str, is
         #   Authorization: Bearer <api_key>
         #   { from, to, subject, html }
         from_field = (
-            f"{RESEND_FROM_NAME} <{RESEND_FROM_EMAIL}>"
-            if RESEND_FROM_NAME else RESEND_FROM_EMAIL
+            f"{_from_name} <{_from_email}>"
+            if _from_name else _from_email
         )
         payload = {
             "from": from_field,
@@ -483,25 +499,25 @@ async def send_email(to_email: str, phone: str, subject: str, html_body: str, is
         # Resend's documented canonical shape is `reply_to` as an ARRAY of
         # addresses — this is what their MIME generator reliably honours.
         # We send ONLY that; the custom headers dict is omitted entirely.
-        if MAIL_REPLY_TO:
-            payload["reply_to"] = [MAIL_REPLY_TO]
+        if _reply_to:
+            payload["reply_to"] = [_reply_to]
 
         if is_test_mode():
             _logger.info(
                 f"[Email DEBUG] provider=resend api=https port=443 "
-                f"from={from_field!r} reply_to={MAIL_REPLY_TO!r} to={to_email}"
+                f"from={from_field!r} reply_to={_reply_to!r} to={to_email}"
             )
 
         _logger.info(
             f"[Email:REQ] provider=resend from={from_field!r} "
-            f"reply_to={MAIL_REPLY_TO!r} to={to_email} subject={subject!r}"
+            f"reply_to={_reply_to!r} to={to_email} subject={subject!r}"
         )
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(
                     "https://api.resend.com/emails",
                     headers={
-                        "Authorization": f"Bearer {RESEND_API_KEY}",
+                        "Authorization": f"Bearer {_api_key}",
                         "Content-Type": "application/json",
                     },
                     json=payload,
