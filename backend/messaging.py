@@ -473,20 +473,18 @@ async def send_email(to_email: str, phone: str, subject: str, html_body: str, is
             "subject": subject,
             "html": html_body,
         }
-        # iter120 — Reply-To dual-belt approach. Previous iter119 passed
-        # `reply_to=["hiring@blubridge.com"]` (list form per Resend docs)
-        # but candidates' Gmail/Outlook Reply still pointed at the From
-        # address (information.team@blubrg.com). Two fixes layered:
-        #   1. `reply_to` as a PLAIN STRING (Resend accepts both, string
-        #      form is the canonical pre-array contract).
-        #   2. Custom `headers["Reply-To"]` so the raw RFC-5322 Reply-To
-        #      header is injected into the MIME envelope directly. Even
-        #      if Resend's JSON-to-header mapping ever drops `reply_to`,
-        #      the custom header guarantees mail clients honour it.
-        # Setting both is safe — Resend deduplicates headers.
+        # iter167 — Reply-To canonical form. Previous iter120 belt-and-braces
+        # approach (plain-string `reply_to` + `headers["Reply-To"]`) hit a
+        # Resend edge-case where the custom header is dropped (Reply-To is a
+        # reserved header Resend manages internally) AND the string-form
+        # top-level field was silently ignored, leaving Gmail no Reply-To
+        # and routing replies back to the From address.
+        #
+        # Resend's documented canonical shape is `reply_to` as an ARRAY of
+        # addresses — this is what their MIME generator reliably honours.
+        # We send ONLY that; the custom headers dict is omitted entirely.
         if MAIL_REPLY_TO:
-            payload["reply_to"] = MAIL_REPLY_TO
-            payload["headers"] = {"Reply-To": MAIL_REPLY_TO}
+            payload["reply_to"] = [MAIL_REPLY_TO]
 
         if is_test_mode():
             _logger.info(
