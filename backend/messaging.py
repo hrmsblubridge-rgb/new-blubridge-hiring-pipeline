@@ -291,6 +291,32 @@ async def reset_otp_on_reschedule(email: str, phone: str) -> int:
 
 # ============ WHATSAPP (AiSensy) ============
 
+
+# iter170 — Shared preview/dev hostname detector. Production is anything
+# where TEST_MODE is false; if any outbound message body or template
+# param contains these markers while TEST_MODE=false, we HARD-REFUSE the
+# send so the wrong URL can never reach a real candidate. Operator sees
+# a loud [BLOCK:PROD_URL_LEAK] error and must fix FRONTEND_URL /
+# PUBLIC_BASE_URL on the production host (Render) before messaging works.
+_PREVIEW_URL_MARKERS = (
+    ".preview.emergentagent.com",
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+)
+
+
+def _scan_for_preview_url(text: str) -> str:
+    """Return the first preview/dev marker found in `text`, or '' if clean."""
+    if not text:
+        return ""
+    low = text.lower()
+    for m in _PREVIEW_URL_MARKERS:
+        if m in low:
+            return m
+    return ""
+
+
 async def send_whatsapp(campaign_name: str, phone: str, email: str, template_params: list, is_test: bool = False):
     """Send WhatsApp via AiSensy API. Returns True on success.
     `is_test` is accepted for backward compatibility but is ignored — gating
@@ -306,6 +332,22 @@ async def send_whatsapp(campaign_name: str, phone: str, email: str, template_par
     if not _is_enabled("ENABLE_WHATSAPP"):
         _logger.info(f"[SKIP] WhatsApp disabled: campaign={campaign_name}")
         return False
+
+    # iter170 — Hard safety guard. If TEST_MODE is off (i.e. a real candidate
+    # is about to receive this) but a template param carries a preview /
+    # dev hostname, REFUSE the send so the wrong URL cannot leak. Operator
+    # must fix FRONTEND_URL / PUBLIC_BASE_URL on the production host.
+    if not is_test_mode():
+        for _p in (template_params or []):
+            _hit = _scan_for_preview_url(str(_p))
+            if _hit:
+                _logger.error(
+                    f"[BLOCK:PROD_URL_LEAK] WhatsApp refused — template param "
+                    f"contains preview marker {_hit!r}. campaign={campaign_name} "
+                    f"phone={phone} email={email}. "
+                    f"Fix FRONTEND_URL / PUBLIC_BASE_URL on Render then redeploy."
+                )
+                return False
 
     # Tester-only debug — surfaces exact template params reaching the provider
     # so we can confirm the right name/role/date arrived from the new submission.
@@ -443,6 +485,20 @@ async def send_email(to_email: str, phone: str, subject: str, html_body: str, is
     if not _is_enabled("ENABLE_EMAIL"):
         _logger.info(f"[SKIP] Email disabled: to={to_email}, subject={subject}")
         return False
+
+    # iter170 — Hard safety guard. If TEST_MODE is off (i.e. a real candidate
+    # is about to receive this) but the HTML body contains a preview / dev
+    # hostname, REFUSE the send so the wrong URL cannot leak. Operator must
+    # fix FRONTEND_URL / PUBLIC_BASE_URL on the production host.
+    if not is_test_mode():
+        _hit = _scan_for_preview_url(html_body)
+        if _hit:
+            _logger.error(
+                f"[BLOCK:PROD_URL_LEAK] Email refused — body contains preview "
+                f"marker {_hit!r}. to={to_email} subject={subject!r}. "
+                f"Fix FRONTEND_URL / PUBLIC_BASE_URL on Render then redeploy."
+            )
+            return False
 
     # Tester-only debug — confirms recipient + subject reaching the API layer.
     if is_test_mode():

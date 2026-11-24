@@ -4631,6 +4631,42 @@ except Exception:
     traceback.print_exc()
     raise
 
+
+# iter170 — Mail / link config diagnostic. Admin-only health check that
+# surfaces the resolved outbound link base and whether a preview URL
+# would be rejected in prod. Lets ops verify live-slot env on Render
+# without having to run a real candidate send to find out.
+@app.get("/api/_health/mail-config")
+async def _mail_config_health(request: Request):
+    _ = await get_current_user(request)
+    from messaging import (
+        build_public_url as _bpu,
+        is_test_mode as _itm,
+        _scan_for_preview_url as _scan,
+    )
+    sample = _bpu("/schedule-interview/sample")
+    hit = _scan(sample)
+    base_src = "PUBLIC_BASE_URL" if os.environ.get("PUBLIC_BASE_URL") else ("FRONTEND_URL" if os.environ.get("FRONTEND_URL") else "unset")
+    return {
+        "test_mode": _itm(),
+        "base_url_source": base_src,
+        "resolved_schedule_link_sample": sample,
+        "would_block_in_prod": bool(hit),
+        "preview_marker_hit": hit or None,
+        "action": (
+            "FIX: set FRONTEND_URL (or PUBLIC_BASE_URL) on Render to your production domain, "
+            "then redeploy. Current base contains a preview/dev host."
+        ) if hit and not _itm() else "OK",
+        "mail": {
+            "enable_email": os.environ.get("ENABLE_EMAIL"),
+            "enable_whatsapp": os.environ.get("ENABLE_WHATSAPP"),
+            "from_email": (os.environ.get("RESEND_FROM_EMAIL") or os.environ.get("FROM_EMAIL") or "(default fallback)"),
+            "from_name": os.environ.get("RESEND_FROM_NAME") or "(default)",
+            "reply_to": os.environ.get("MAIL_REPLY_TO") or "(default)",
+            "resend_api_key_set": bool(os.environ.get("RESEND_API_KEY")),
+        },
+    }
+
 # iter133 — Team Score module (isolated; new collections ts_rounds + ts_employees)
 try:
     from team_score import attach as _attach_team_score
