@@ -19,6 +19,34 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - [x] Mock-only safety net preserved (`AI_CALLING_ENABLED=false`, Emergency Stop ON, `hiring_ai_testing` only)
 
 ## CHANGELOG
+### 2026-02-?? — iter174 · Same-role duplicate registration
+
+**Shipped**
+
+Backend (`bb_modules.py` · `/api/pub/register/preview`):
+- Accepts optional `new_role` in body. When `new_role` matches the existing active role (case-insensitive) AND both email + phone identify the same stored row (AND-match), returns two new scenarios:
+  - `same_role_shortlisted_not_scheduled` + `schedule_token` — for the direct "Schedule Interview" CTA.
+  - `same_role_scheduled` + `schedule_date` + `schedule_time` — no further action.
+- AND-match is required before exposing the `schedule_token`; OR-match (one-field mismatch) falls through to the generic scenarios so a third party knowing only one field cannot grab a scheduling link.
+- Omitting `new_role` preserves the iter172 contract for other callers.
+
+Frontend (`PublicRegistration.js`):
+- Submit flow passes `new_role: form.job_role` to preview.
+- Two new result-page renders (`SAME_ROLE_SHORTLISTED` and `SAME_ROLE_SCHEDULED`) using the existing design system (same cream/white card, emerald accent, same type scale).
+- `SAME_ROLE_SHORTLISTED` shows "You've already applied!" + role name + Schedule Interview button linking to the existing `/schedule-interview/<token>` route.
+- `SAME_ROLE_SCHEDULED` shows the booked role / date / time with no action — "No further action is required."
+
+**Live mail + WhatsApp verification (iter174)**
+Delivered to the only authorized tester (`rishi.nayak@blubridge.com` / `9443109903`):
+- AiSensy 200 OK
+- Resend 200 OK
+
+**Validation**
+- `test_iter174_same_role_scenarios.py` — 6/6 pytest (same-role Case-A returns token, same-role Case-B returns date/time, case-insensitive role match, different-role falls through to role-select, AND-match required for token exposure, legacy no-new-role preserved).
+- Full regression across iter170 + iter171 + iter172 + iter173 + iter174 — **28/28 pytest green**.
+- Zero live outbound to anyone outside the authorized tester identity.
+- No schema / env / dependency changes.
+
 ### 2026-02-?? — iter173 · Req 4 FULL implementation (backend + frontend + banner)
 
 **Shipped**

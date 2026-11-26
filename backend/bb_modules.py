@@ -6337,6 +6337,11 @@ async def register_applicant(data: RegistrationBody):
 class RegisterPreviewBody(BaseModel):
     email: str
     phone: str
+    # iter174 — When provided, the preview endpoint evaluates same-role
+    # vs different-role. On same-role AND-match, the response includes the
+    # existing schedule_token so the frontend can offer a direct
+    # "Schedule Interview" CTA without creating a second active row.
+    new_role: Optional[str] = ""
 
     @field_validator("email")
     @classmethod
@@ -6354,6 +6359,7 @@ async def preview_registration(body: RegisterPreviewBody):
     """READ-ONLY. See module docstring above — no writes, no notifications."""
     email = body.email
     phone = body.phone
+    new_role = (body.new_role or "").strip().lower()
     if not email and not phone:
         return {"scenario": "none"}
 
@@ -6415,7 +6421,7 @@ async def preview_registration(body: RegisterPreviewBody):
         },
         {
             "_id": 0, "job_role": 1, "schedule_date": 1, "schedule_time": 1,
-            "registered_at": 1,
+            "registered_at": 1, "schedule_token": 1, "email": 1, "phone": 1,
         },
         sort=[("registered_at", -1)],
     )
@@ -6425,7 +6431,31 @@ async def preview_registration(body: RegisterPreviewBody):
     existing_role = active.get("job_role", "") or ""
     sd = (active.get("schedule_date") or "").strip()
     st = (active.get("schedule_time") or "").strip()
-    if sd and st:
+    is_scheduled = bool(sd and st)
+
+    # iter174 — Same-role detection. Case where BOTH:
+    #   1. The new_role equals the existing active role (case-insensitive), AND
+    #   2. Both email AND phone identify the same stored row (AND-match).
+    # Exposing the schedule_token here is safe because the caller already
+    # proved ownership by supplying both fields that match the record.
+    both_match = (
+        (active.get("email") or "").strip().lower() == email
+        and (active.get("phone") or "").strip() == phone
+    )
+    is_same_role = bool(new_role) and existing_role.strip().lower() == new_role
+
+    if is_same_role and both_match:
+        payload = {
+            "scenario": "same_role_scheduled" if is_scheduled else "same_role_shortlisted_not_scheduled",
+            "existing_role": existing_role,
+            "schedule_token": active.get("schedule_token") or "",
+        }
+        if is_scheduled:
+            payload["schedule_date"] = sd
+            payload["schedule_time"] = st
+        return payload
+
+    if is_scheduled:
         return {
             "scenario": "scheduled",
             "existing_role": existing_role,

@@ -75,12 +75,10 @@ export default function PublicRegistration() {
         setSubmitting(true);
         try {
             // iter173 — Req 4: preview existing-application scenario BEFORE
-            // submitting. This catches the 6-month attendance block, the
-            // "shortlisted-for-another-role" case, and the "already-scheduled
-            // -for-another-role" case so the candidate sees the proper
-            // selection box instead of silently creating a second active row.
+            // submitting. iter174 — Also pass the new role name so preview can
+            // distinguish same-role vs different-role.
             const prev = await axios.post(`${API}/api/pub/register/preview`, {
-                email, phone: phoneNorm.value,
+                email, phone: phoneNorm.value, new_role: form?.job_role || '',
             });
             const scenario = prev.data?.scenario;
             if (scenario === 'blocked_by_attendance') {
@@ -88,6 +86,35 @@ export default function PublicRegistration() {
                     status: 'BLOCKED', is_shortlisted: false,
                     reason: 'ALREADY_ATTENDED',
                     message: `You have already attended an interview with BluBridge within the last six months. As per our recruitment policy, you will be eligible to apply again after six months from your last interview attendance date.${prev.data.eligible_from ? ` Eligible to apply again from: ${prev.data.eligible_from}` : ''}`,
+                });
+                setStep('result');
+                setSubmitting(false);
+                return;
+            }
+            // iter174 — Same-role duplicate registration. Candidate is applying
+            // again for the SAME role they already got shortlisted for. Show the
+            // "already applied" screen instead of creating a duplicate active row.
+            if (scenario === 'same_role_shortlisted_not_scheduled') {
+                setResult({
+                    status: 'SAME_ROLE_SHORTLISTED',
+                    is_shortlisted: true,
+                    existing_role: prev.data.existing_role,
+                    schedule_token: prev.data.schedule_token,
+                    scheduleLink: prev.data.schedule_token
+                        ? `/schedule-interview/${prev.data.schedule_token}`
+                        : '',
+                });
+                setStep('result');
+                setSubmitting(false);
+                return;
+            }
+            if (scenario === 'same_role_scheduled') {
+                setResult({
+                    status: 'SAME_ROLE_SCHEDULED',
+                    is_shortlisted: true,
+                    existing_role: prev.data.existing_role,
+                    schedule_date: prev.data.schedule_date,
+                    schedule_time: prev.data.schedule_time,
                 });
                 setStep('result');
                 setSubmitting(false);
@@ -532,6 +559,100 @@ export default function PublicRegistration() {
         const isShortlisted = result?.status === 'SHORTLISTED' || result?.is_shortlisted;
         const reason = result?.reason || '';
         const message = result?.message || '';
+
+        // iter174 — Same-role duplicate registration handlers (both cases).
+        if (result?.status === 'SAME_ROLE_SHORTLISTED') {
+            const existingRole = result.existing_role || 'this role';
+            const scheduleHref = result.scheduleLink || '#';
+            return (
+                <div className="min-h-screen bg-[#f3f1e9] flex flex-col" data-testid="result-same-role-shortlisted">
+                    <header className="bg-[#efede5] border-b border-gray-300 py-4 px-6 flex justify-center">
+                        <img src="/blubridge-logo.webp" alt="Blubridge" />
+                    </header>
+                    <div className="flex-1 flex items-center justify-center px-6 py-10">
+                        <div className="max-w-lg w-full">
+                            <div className="bg-[#fffdf7] rounded-xl shadow-sm overflow-hidden">
+                                <div className="h-3 rounded-t-xl bg-emerald-600"></div>
+                                <div className="p-8 text-center space-y-5">
+                                    <h2 className="text-2xl font-bold text-emerald-700" data-testid="result-title">You've already applied!</h2>
+                                    <p className="text-sm text-gray-700">You have already registered for the <b>{existingRole}</b> position and have been <b>shortlisted</b>.</p>
+                                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-left text-sm text-emerald-900">
+                                        <p>You haven't scheduled your interview yet. Please proceed to schedule your slot now.</p>
+                                    </div>
+                                    {result.schedule_token && (
+                                        <a href={scheduleHref}
+                                            data-testid="same-role-schedule-btn"
+                                            className="inline-block w-full py-3 bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold rounded-lg text-center">
+                                            Schedule Interview
+                                        </a>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <footer className="py-4 text-center text-sm text-gray-500">Copyright 2026 &copy; <b>Blubridge.com</b></footer>
+                </div>
+            );
+        }
+
+        if (result?.status === 'SAME_ROLE_SCHEDULED') {
+            const existingRole = result.existing_role || 'this role';
+            const sd = result.schedule_date || '';
+            const st = result.schedule_time || '';
+            // Format DD-MMM-YYYY for display (same format used elsewhere in the app).
+            let prettyDate = sd;
+            try {
+                if (sd) {
+                    const d = new Date(sd);
+                    prettyDate = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+                }
+            } catch (_) { prettyDate = sd; }
+            // Convert "HH:MM" → "hh:mm AM/PM" for display.
+            let prettyTime = st;
+            try {
+                if (/^\d{1,2}:\d{2}/.test(st)) {
+                    const [hh, mm] = st.split(':').map(Number);
+                    const period = hh >= 12 ? 'PM' : 'AM';
+                    const h12 = ((hh + 11) % 12) + 1;
+                    prettyTime = `${String(h12).padStart(2,'0')}:${String(mm).padStart(2,'0')} ${period}`;
+                }
+            } catch (_) { prettyTime = st; }
+            return (
+                <div className="min-h-screen bg-[#f3f1e9] flex flex-col" data-testid="result-same-role-scheduled">
+                    <header className="bg-[#efede5] border-b border-gray-300 py-4 px-6 flex justify-center">
+                        <img src="/blubridge-logo.webp" alt="Blubridge" />
+                    </header>
+                    <div className="flex-1 flex items-center justify-center px-6 py-10">
+                        <div className="max-w-lg w-full">
+                            <div className="bg-[#fffdf7] rounded-xl shadow-sm overflow-hidden">
+                                <div className="h-3 rounded-t-xl bg-emerald-600"></div>
+                                <div className="p-8 text-center space-y-5">
+                                    <h2 className="text-2xl font-bold text-emerald-700" data-testid="result-title">Interview Already Scheduled</h2>
+                                    <p className="text-sm text-gray-700">You have already scheduled an interview for the <b>{existingRole}</b> position.</p>
+                                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-left text-sm text-emerald-900 space-y-2">
+                                        <div className="flex justify-between">
+                                            <span className="font-semibold">Role:</span>
+                                            <span data-testid="same-role-sched-role">{existingRole}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="font-semibold">Date:</span>
+                                            <span data-testid="same-role-sched-date">{prettyDate}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="font-semibold">Time:</span>
+                                            <span data-testid="same-role-sched-time">{prettyTime}</span>
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-gray-500">Please attend the interview at the scheduled date and time. No further action is required.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <footer className="py-4 text-center text-sm text-gray-500">Copyright 2026 &copy; <b>Blubridge.com</b></footer>
+                </div>
+            );
+        }
+
         const showSchedule = result?.showSchedule || (isShortlisted && result?.schedule_token);
         // Prefer backend-supplied absolute scheduleLink (uses FRONTEND_URL); fall back to relative.
         const scheduleHref = result?.scheduleLink || (result?.schedule_token ? `/schedule-interview/${result.schedule_token}${result?._fromSwitchQuery || ''}` : '#');
