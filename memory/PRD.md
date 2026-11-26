@@ -19,6 +19,43 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - [x] Mock-only safety net preserved (`AI_CALLING_ENABLED=false`, Emergency Stop ON, `hiring_ai_testing` only)
 
 ## CHANGELOG
+### 2026-02-?? — iter173 · Req 4 FULL implementation (backend + frontend + banner)
+
+**Shipped**
+
+Backend (`bb_modules.py`):
+- New destructive endpoint `POST /api/pub/register/switch-role`.
+- Strict AND-match identity (email + phone must both match a non-superseded, `is_shortlisted=True` row).
+- Atomic claim-first CAS via `role_switch_in_progress` to prevent concurrent double-switches.
+- Pre-flips every outbound-idempotency flag on the OLD row (`otp_wa/email_sent`, `otp_dispatch_in_progress`, `missed_reminder_wa/email_sent` + `missed_reminder_token`, `reminder_24h_sent`, `schedule_link_sent`, `interview_mail_sent`, `reject_notified`, `rejection_sent`) so every background worker filter skips the cancelled row forever.
+- Invalidates `schedule_token` (`schedule_token_invalidated=True`), marks `status=CANCELLED_BY_ROLE_SWITCH`, writes `cancelled_from_role` audit field, marks `superseded=True`.
+- Then delegates to `register_applicant` for the new role — existing supersede + CAS + inline-notify machinery handles the new row + shortlisting + notifications. New row's notifications fire normally; old row's never do again.
+- Response enriched with `switched_from_role` + `previous_interview_cancelled`.
+
+Frontend:
+- `PublicRegistration.js` now calls `/api/pub/register/preview` BEFORE submit. Scenario-driven render:
+  - `blocked_by_attendance` → direct to blocked-result screen with 6-month message + eligible-from date.
+  - `shortlisted_not_scheduled` → Case-1 selection box (Options 1/2 using the spec text with dynamic role names).
+  - `scheduled` → Case-2 selection box.
+- Case-2 Option 2 triggers a `<dialog>` confirmation (`Cancel` / `Confirm & Continue`) before calling `/switch-role`.
+- Case-1 Option 1 and Case-2 Option 1 show confirmation that existing application is retained (no new DB write, no notification).
+- `InterviewSchedule.js` reads `?from_switch=1&prev_role=X` query params and renders the "Important Notice: previously scheduled interview cancelled" amber banner ABOVE the slot picker. Hidden for ordinary applicants.
+
+**Enforcement for existing applicants**
+The preview + switch-role contract works on live `bb_registrations` records (reads non-superseded + `is_shortlisted=True` directly). Any existing applicant who now registers for a different role is routed through the selection screen before any destructive write — no backfill or migration needed.
+
+**Validation**
+- `test_iter173_switch_role.py` — 5/5 pytest: happy-path Case-2 + Case-1, AND-match identity (phone-only reject), CAS duplicate rejection (409), existing-applicant preview detection.
+- Full regression across iter170 + iter171 + iter172 + iter173 — **22/22 pytest green**.
+- Zero live outbound. All synthetic identities uuid-tagged + allowlisted via `bb_test_credentials` for the test session; narrow teardown on the tag.
+- No schema / env / dependency changes.
+
+**Files**
+- `/app/backend/bb_modules.py` — `/switch-role` endpoint only (additive).
+- `/app/frontend/src/pages/PublicRegistration.js` — scenario state + `doRegisterSubmit` split + Case-1/Case-2 render + confirmation dialog.
+- `/app/frontend/src/pages/InterviewSchedule.js` — banner render + query-param read.
+- `/app/backend/tests/test_iter173_switch_role.py` — new.
+
 ### 2026-02-?? — iter172 · Req 4 safe slice + Req 2 audit findings
 
 **Req 2 — Notification duplicate audit (no code change needed).**

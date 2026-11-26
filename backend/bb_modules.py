@@ -6438,6 +6438,155 @@ async def preview_registration(body: RegisterPreviewBody):
     }
 
 
+# ============================================================
+# iter173 — Req 4 destructive: atomic role switch.
+# ============================================================
+# Identity: BOTH email AND phone must match an existing active (non-superseded,
+# is_shortlisted=True) application. This is stricter than `/preview` (OR-match)
+# because this endpoint cancels an interview — we require stronger identity
+# proof. OTP re-auth can be layered on top later when the UI has the OTP box;
+# for now the dual-field match is the gate.
+#
+# Flow:
+#   1. CAS claim `role_switch_in_progress=True` on the existing row (atomic).
+#   2. Mark the existing row cancelled-by-role-switch, invalidate its
+#      schedule_token, and PRE-FLIP every outbound idempotency flag so any
+#      pending background worker (OTP, missed-reminder, 24h reminder,
+#      rejection dispatcher, schedule-link worker) will skip it forever.
+#   3. Call `register_applicant` with the new body — the existing supersede +
+#      CAS logic handles the new row insert, shortlisting eval, and inline
+#      notification exactly like a fresh registration.
+#   4. Return the register response enriched with switch audit fields.
+#
+# STRICT: no notifications for the old row (all suppressed via flag pre-flip).
+# All destructive writes are scoped to the single `_id` of the matched row.
+
+@pub_router.post("/register/switch-role")
+async def switch_role(body: RegistrationBody):
+    """Atomically switch a candidate from an existing active application
+    to a newly-submitted role. See module docstring above."""
+    email = (body.email or "").strip().lower()
+    phone = re.sub(r"[^\d]", "", (body.phone or "").strip())
+    if len(phone) > 10:
+        phone = phone[-10:]
+    if not (email and phone):
+        raise HTTPException(400, "Both email and phone are required for role switch.")
+
+    # STRICTER identity: AND-match, not OR. Prevents hijacking a third party's
+    # scheduled interview by knowing just one of (email, phone).
+    existing = await _db.bb_registrations.find_one(
+        {
+            "email": email,
+            "phone": phone,
+            "superseded": {"$ne": True},
+            "is_shortlisted": True,
+        },
+        sort=[("registered_at", -1)],
+    )
+    if not existing:
+        raise HTTPException(
+            409,
+            "No active application matches this email and phone. "
+            "Submit through the standard registration flow instead.",
+        )
+
+    # CAS: only one runner may switch this row at a time.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cas = await _db.bb_registrations.update_one(
+        {
+            "_id": existing["_id"],
+            "role_switch_in_progress": {"$ne": True},
+        },
+        {
+            "$set": {
+                "role_switch_in_progress": True,
+                "role_switch_started_at": now_iso,
+            }
+        },
+    )
+    if cas.modified_count == 0:
+        raise HTTPException(
+            409,
+            "Another role-switch for this application is already in progress. "
+            "Please wait a moment and retry.",
+        )
+
+    had_schedule = bool(
+        (existing.get("schedule_date") or "").strip()
+        and (existing.get("schedule_time") or "").strip()
+    )
+    prev_role = existing.get("job_role") or ""
+    stored_token = existing.get("schedule_token") or f"cancelled_{existing['_id']}"
+
+    # Pre-flip every outbound-idempotency flag on the OLD row so NO background
+    # worker ever re-fires a notification for the cancelled interview.
+    # Order: OTP suppression → missed-reminder suppression → 24h reminder →
+    # rejection suppression → interview-mail suppression → schedule-link
+    # suppression. Each flag matches exactly what the corresponding worker's
+    # filter checks in bg_workers.py.
+    await _db.bb_registrations.update_one(
+        {"_id": existing["_id"]},
+        {
+            "$set": {
+                # Audit fields
+                "cancelled_by_role_switch": True,
+                "cancelled_by_role_switch_at": now_iso,
+                "cancelled_from_role": prev_role,
+                "status": "CANCELLED_BY_ROLE_SWITCH",
+                # Invalidate the schedule link
+                "schedule_token_invalidated": True,
+                "schedule_token_invalidated_at": now_iso,
+                # Mark the row stale for every worker
+                "superseded": True,
+                # OTP worker filter
+                "otp_wa_sent": True,
+                "otp_email_sent": True,
+                "otp_dispatch_in_progress": True,
+                # Missed-reminder worker filter (token match)
+                "missed_reminder_wa_sent": True,
+                "missed_reminder_email_sent": True,
+                "missed_reminder_token": stored_token,
+                "missed_reminder_sent_at": now_iso,
+                # 24h reminder worker filter
+                "reminder_24h_sent": True,
+                # Schedule-link worker filter
+                "schedule_link_sent": True,
+                # Interview-mail (confirmation) worker filter
+                "interview_mail_sent": True,
+                # Rejection dispatcher filters
+                "reject_notified": True,
+                "rejection_pending": False,
+                "rejection_sent": True,
+            }
+        },
+    )
+    _logger.info(
+        f"[RoleSwitch] email={email} phone={phone} prev_role={prev_role!r} "
+        f"had_schedule={had_schedule} old_id={existing['_id']}"
+    )
+
+    # Delegate to the normal registration path for the NEW role.
+    # `register_applicant` handles its own supersede sweep + new-row insert +
+    # inline notify. The existing CAS on `schedule_link_sent` still guarantees
+    # exactly-once shortlist notification for the new row.
+    try:
+        result = await register_applicant(body)
+    except HTTPException:
+        # Unwind the role_switch_in_progress lock on failure (we keep the
+        # cancellation of the old row — the switch intent was explicit).
+        await _db.bb_registrations.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {"role_switch_in_progress": False,
+                      "role_switch_error_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        raise
+
+    if isinstance(result, dict):
+        result["switched_from_role"] = prev_role
+        result["previous_interview_cancelled"] = had_schedule
+    return result
+
+
 @pub_router.post("/schedule-click/{token}")
 async def schedule_click(token: str):
     """Candidate clicked the 'Schedule Interview' CTA — mark the flag so the

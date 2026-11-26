@@ -75,6 +75,12 @@ const DetailCell = ({ label, value, testid, mono }) => {
 
 export default function InterviewSchedule() {
     const { token } = useParams();
+    // iter173 — Role-switch banner: when the candidate arrives here after
+    // Case-2 role switch, we show the "previously scheduled interview
+    // cancelled" notice at the top so they know the old slot is gone.
+    const _search = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const fromSwitch = _search?.get('from_switch') === '1';
+    const prevRole = _search?.get('prev_role') || '';
     const [info, setInfo] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -218,6 +224,23 @@ export default function InterviewSchedule() {
                                 )}
                             </div>
                         </section>
+
+                        {/* iter173 — Role-switch banner. When a candidate arrives here
+                            via a successful Case-2 role switch (query string `from_switch=1`),
+                            surface the "previous interview cancelled" notice at the top of
+                            the scheduling form so they understand the old slot is gone and
+                            they must pick a NEW one. Hidden otherwise. */}
+                        {fromSwitch && (
+                            <section
+                                data-testid="role-switch-banner"
+                                className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3.5 space-y-1"
+                                aria-labelledby="role-switch-banner-heading">
+                                <h3 id="role-switch-banner-heading" className="text-[10px] font-bold uppercase tracking-widest text-amber-800">Important Notice</h3>
+                                <p className="text-sm text-amber-900 leading-relaxed">
+                                    Your previously scheduled interview{prevRole ? <> for <b>{prevRole}</b></> : null} has been cancelled and is no longer valid. Please schedule a new interview for your selected role{info?.job_role ? <>, <b>{info.job_role}</b></> : null}.
+                                </p>
+                            </section>
+                        )}
 
                         {/* Enhancement 1 — availability gate. Slot picker only
                             renders once the candidate persists YES. */}

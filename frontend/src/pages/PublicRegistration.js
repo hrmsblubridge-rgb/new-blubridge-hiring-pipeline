@@ -31,6 +31,11 @@ export default function PublicRegistration() {
     const [submitting, setSubmitting] = useState(false);
     const [result, setResult] = useState(null);
     const [f, setF] = useState({ full_name:'', email:'', phone:'', age:'', current_location_state:'', preferred_location_city:'', year_of_graduation:'', degree:'', course:'', college:'', location_change:null, attend_in_person:null });
+    // iter173 — Role-selection state. When preview detects an existing active
+    // application for this email+phone, we stash the scenario here and render
+    // the Case-1 / Case-2 selection boxes before touching the DB.
+    const [roleSelect, setRoleSelect] = useState(null);
+    const [confirmSwitch, setConfirmSwitch] = useState(false);
 
     useEffect(() => {
         // eslint-disable-next-line no-console
@@ -64,39 +69,43 @@ export default function PublicRegistration() {
         const state = (f.current_location_state || '').trim();
         if (!fullName || !email || !f.phone) { alert('Full Name, Email, and Phone are required'); return; }
         if (!phoneNorm.ok) { alert(phoneNorm.error); return; }
-        // Replace raw input with normalized 10-digit form so backend sees the canonical value.
         setF(p => ({ ...p, phone: phoneNorm.value }));
         if (!state || !city) { alert('Current Location (State) and Preferred Location (City) are required'); return; }
         if (gradOther && !/^\d{4}$/.test(f.year_of_graduation || '')) { alert('Please enter a valid 4-digit Year of Graduation'); return; }
         setSubmitting(true);
         try {
-            const payload = { form_id: formId, ...f, age: f.age ? Number(f.age) : null, year_of_graduation: f.year_of_graduation ? Number(f.year_of_graduation) : null };
-            const r = await axios.post(`${API}/api/pub/register`, payload);
-            setResult(r.data);
-            // For AI/ML role we still show the "What You Need to Know" interstitial,
-            // then the result page. For all other forms go straight to result.
-            const isShortlisted = r.data?.status === 'SHORTLISTED' || r.data?.is_shortlisted;
-            // iter131 — Default Instruction Page fallback. When admin
-            // sets Show Information Page = Yes but leaves the custom
-            // content empty, fall back to the AI/ML "What You Need to
-            // Know" template REGARDLESS of role (previously this was
-            // gated on the job_role containing "ai" + "ml", so any
-            // other role silently skipped to /result). Only shortlisted
-            // applicants see the interstitial — a rejected applicant
-            // shouldn't see "what to expect on day one".
-            if (form?.show_instruction_page) {
-                if ((form.instruction_content || '').trim()) {
-                    setStep('instructions');
-                } else if (isShortlisted) {
-                    setStep('aiml');
-                } else {
-                    setStep('result');
-                }
-            } else {
+            // iter173 — Req 4: preview existing-application scenario BEFORE
+            // submitting. This catches the 6-month attendance block, the
+            // "shortlisted-for-another-role" case, and the "already-scheduled
+            // -for-another-role" case so the candidate sees the proper
+            // selection box instead of silently creating a second active row.
+            const prev = await axios.post(`${API}/api/pub/register/preview`, {
+                email, phone: phoneNorm.value,
+            });
+            const scenario = prev.data?.scenario;
+            if (scenario === 'blocked_by_attendance') {
+                setResult({
+                    status: 'BLOCKED', is_shortlisted: false,
+                    reason: 'ALREADY_ATTENDED',
+                    message: `You have already attended an interview with BluBridge within the last six months. As per our recruitment policy, you will be eligible to apply again after six months from your last interview attendance date.${prev.data.eligible_from ? ` Eligible to apply again from: ${prev.data.eligible_from}` : ''}`,
+                });
                 setStep('result');
+                setSubmitting(false);
+                return;
             }
+            if (scenario === 'shortlisted_not_scheduled' || scenario === 'scheduled') {
+                setRoleSelect({
+                    scenario,
+                    existing_role: prev.data.existing_role,
+                    schedule_date: prev.data.schedule_date,
+                    schedule_time: prev.data.schedule_time,
+                });
+                setStep('role_select');
+                setSubmitting(false);
+                return;
+            }
+            await doRegisterSubmit();
         } catch (e) {
-            // Friendly handling for the 4-month re-registration block (409)
             const status = e.response?.status;
             const detail = e.response?.data?.detail || 'Registration failed';
             if (status === 409) {
@@ -105,8 +114,40 @@ export default function PublicRegistration() {
             } else {
                 alert(detail);
             }
+            setSubmitting(false);
         }
-        finally { setSubmitting(false); }
+    };
+
+    // iter173 — Actual POST /register call, invoked when no existing active
+    // application exists OR after the candidate confirms a role switch.
+    const doRegisterSubmit = async (endpoint = '/api/pub/register', extraQuery = '') => {
+        setSubmitting(true);
+        try {
+            const payload = { form_id: formId, ...f, phone: phoneNorm.value,
+                              age: f.age ? Number(f.age) : null,
+                              year_of_graduation: f.year_of_graduation ? Number(f.year_of_graduation) : null };
+            const r = await axios.post(`${API}${endpoint}`, payload);
+            setResult({ ...r.data, _fromSwitchQuery: extraQuery });
+            const isShortlisted = r.data?.status === 'SHORTLISTED' || r.data?.is_shortlisted;
+            if (form?.show_instruction_page) {
+                if ((form.instruction_content || '').trim()) { setStep('instructions'); }
+                else if (isShortlisted) { setStep('aiml'); }
+                else { setStep('result'); }
+            } else {
+                setStep('result');
+            }
+        } catch (e) {
+            const status = e.response?.status;
+            const detail = e.response?.data?.detail || 'Registration failed';
+            if (status === 409) {
+                setResult({ status: 'BLOCKED', is_shortlisted: false, message: detail, reason: 'ALREADY_ATTENDED' });
+                setStep('result');
+            } else {
+                alert(detail);
+            }
+        } finally {
+            setSubmitting(false);
+        }
     };
 
     if (loading) return <div className="min-h-screen bg-[#f3f1e9] flex items-center justify-center text-gray-500">Loading...</div>;
@@ -359,6 +400,133 @@ export default function PublicRegistration() {
         );
     }
 
+    // iter173 — Role-selection screen (Case 1 & Case 2). Rendered BEFORE
+    // any destructive register/switch call. Uses the app's existing design
+    // system (cream background, white card, blue buttons, same typography).
+    if (step === 'role_select' && roleSelect) {
+        const newRole = form?.job_role || 'the new role';
+        const existingRole = roleSelect.existing_role || 'another role';
+        const isScheduled = roleSelect.scenario === 'scheduled';
+        const title = isScheduled ? 'You Already Have a Scheduled Interview' : 'You Already Have an Active Application';
+        const subline = isScheduled
+            ? `You have already scheduled an interview for the ${existingRole} position.`
+            : `You have already been shortlisted for the ${existingRole} position, but you have not yet scheduled your interview.`;
+        const option1Label = isScheduled ? `Retain Existing Interview` : `Schedule Interview for ${existingRole}`;
+        const option1Desc = isScheduled
+            ? `Continue with your existing application and scheduled interview for ${existingRole}.`
+            : `Continue with your existing shortlisted application and schedule your interview for this role.`;
+        const option2Label = isScheduled ? `Switch to ${newRole}` : `Continue with ${newRole}`;
+        const option2Desc = isScheduled
+            ? `Replace your existing application with your new application for ${newRole}. Your previously scheduled interview will be cancelled.`
+            : `Your existing application for ${existingRole} will be replaced with your new application for ${newRole}. Your eligibility for the new role will be evaluated according to its recruitment criteria.`;
+
+        // Option 1 action — retain existing. We do NOT expose the token here;
+        // the candidate was already messaged about it on their original
+        // shortlist email/WhatsApp. Just show a confirmation.
+        const onRetain = () => {
+            setResult({
+                status: 'EXISTING_RETAINED',
+                is_shortlisted: false,
+                message: isScheduled
+                    ? `Your scheduled interview for ${existingRole} remains unchanged. Your new application for ${newRole} has not been processed. Please check the WhatsApp / Email messages previously sent for your interview details.`
+                    : `Your existing application for ${existingRole} is retained. Please use the scheduling link previously sent via WhatsApp / Email to book your slot.`,
+                reason: 'EXISTING_RETAINED',
+            });
+            setStep('result');
+        };
+
+        // Option 2 action — switch role. For Case-2 (scheduled), require
+        // the extra confirmation box FIRST.
+        const onSwitch = async () => {
+            if (isScheduled && !confirmSwitch) {
+                setConfirmSwitch(true);
+                return;
+            }
+            setConfirmSwitch(false);
+            await doRegisterSubmit('/api/pub/register/switch-role',
+                `?from_switch=1&prev_role=${encodeURIComponent(existingRole)}`);
+        };
+
+        return (
+            <div className="min-h-screen bg-[#f3f1e9] flex flex-col" data-testid="role-select-page">
+                <header className="bg-[#efede5] border-b border-gray-300 py-4 px-6 flex justify-center">
+                    <img src="/blubridge-logo.webp" alt="Blubridge" />
+                </header>
+                <div className="flex-1 flex items-center justify-center px-6 py-10">
+                    <div className="max-w-xl w-full">
+                        <div className="bg-[#fffdf7] rounded-xl shadow-sm overflow-hidden">
+                            <div className="h-3 rounded-t-xl bg-[#2563eb]"></div>
+                            <div className="p-8 space-y-5">
+                                <h2 className="text-2xl font-bold text-gray-900" data-testid="role-select-title">{title}</h2>
+                                <p className="text-sm text-gray-700">{subline}</p>
+                                <p className="text-sm text-gray-700">You can proceed with only one role at a time. Please select how you would like to continue.</p>
+
+                                {/* Option 1 */}
+                                <div className="border border-gray-200 rounded-lg p-4 bg-white">
+                                    <p className="font-bold text-gray-900">Option 1 — {option1Label}</p>
+                                    <p className="text-sm text-gray-700 mt-1">{option1Desc}</p>
+                                    <button onClick={onRetain}
+                                            data-testid="role-select-option1-btn"
+                                            disabled={submitting}
+                                            className="mt-3 w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold rounded-lg">
+                                        {option1Label}
+                                    </button>
+                                </div>
+
+                                {/* Option 2 */}
+                                <div className="border border-gray-200 rounded-lg p-4 bg-white">
+                                    <p className="font-bold text-gray-900">Option 2 — {option2Label}</p>
+                                    <p className="text-sm text-gray-700 mt-1">{option2Desc}</p>
+                                    <button onClick={onSwitch}
+                                            data-testid="role-select-option2-btn"
+                                            disabled={submitting}
+                                            className="mt-3 w-full py-2.5 bg-[#2563eb] hover:bg-[#1d4ed8] disabled:opacity-50 text-white font-semibold rounded-lg">
+                                        {submitting ? 'Processing…' : option2Label}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Case-2 confirmation dialog */}
+                        {isScheduled && confirmSwitch && (
+                            <div className="fixed inset-0 bg-black/40 flex items-center justify-center px-4 z-50" data-testid="confirm-switch-dialog">
+                                <div className="bg-[#fffdf7] rounded-xl shadow-xl max-w-lg w-full">
+                                    <div className="h-3 rounded-t-xl bg-amber-500"></div>
+                                    <div className="p-6 space-y-4">
+                                        <h3 className="text-lg font-bold text-gray-900">Confirm Role Change</h3>
+                                        <p className="text-sm text-gray-700">You are about to replace your existing application for <b>{existingRole}</b> with your new application for <b>{newRole}</b>.</p>
+                                        <p className="text-sm text-gray-700">By proceeding:</p>
+                                        <ul className="list-disc pl-6 space-y-1 text-sm text-gray-700">
+                                            <li>Your previously scheduled interview for <b>{existingRole}</b> will be cancelled.</li>
+                                            <li>Your existing active application information will be replaced with your newly submitted application information.</li>
+                                            <li>Your eligibility for <b>{newRole}</b> will be evaluated independently.</li>
+                                            <li>If shortlisted, you will need to schedule a new interview.</li>
+                                        </ul>
+                                        <p className="text-sm text-gray-700 font-semibold">Do you wish to continue?</p>
+                                        <div className="flex gap-3 pt-2">
+                                            <button onClick={() => setConfirmSwitch(false)}
+                                                    data-testid="confirm-switch-cancel-btn"
+                                                    className="flex-1 py-2.5 border border-gray-300 text-gray-700 font-semibold rounded-lg hover:bg-gray-50">
+                                                Cancel
+                                            </button>
+                                            <button onClick={onSwitch}
+                                                    data-testid="confirm-switch-continue-btn"
+                                                    disabled={submitting}
+                                                    className="flex-1 py-2.5 bg-[#2563eb] hover:bg-[#1d4ed8] disabled:opacity-50 text-white font-semibold rounded-lg">
+                                                {submitting ? 'Processing…' : 'Confirm & Continue'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+                <footer className="py-4 text-center text-sm text-gray-500">Copyright 2026 &copy; <b>Blubridge.com</b></footer>
+            </div>
+        );
+    }
+
     // Result Page — dynamic shortlisted / rejected UI
     if (step === 'result' || step === 'success') {
         const isShortlisted = result?.status === 'SHORTLISTED' || result?.is_shortlisted;
@@ -366,7 +534,7 @@ export default function PublicRegistration() {
         const message = result?.message || '';
         const showSchedule = result?.showSchedule || (isShortlisted && result?.schedule_token);
         // Prefer backend-supplied absolute scheduleLink (uses FRONTEND_URL); fall back to relative.
-        const scheduleHref = result?.scheduleLink || (result?.schedule_token ? `/schedule-interview/${result.schedule_token}` : '#');
+        const scheduleHref = result?.scheduleLink || (result?.schedule_token ? `/schedule-interview/${result.schedule_token}${result?._fromSwitchQuery || ''}` : '#');
         // Mark schedule_initiated BEFORE navigating so the 5-min delayed
         // Schedule Link worker doesn't also email/whatsapp the candidate.
         const handleScheduleClick = (e) => {
