@@ -281,7 +281,7 @@ export default function PublicRegistration() {
                             <ul className="list-disc pl-6 space-y-1.5 text-sm text-gray-800 leading-relaxed marker:text-gray-700">
                                 <li>Begin by appearing for the <b>initial interview rounds.</b></li>
                                 <li>If selected, you'll be invited to a <b>second stage</b> where a strong grasp of Mathematics for Machine Learning is essential.</li>
-                                <li>You'll get <b>up to a month</b> to prepare. Final selection is based on a <b>Maths for Deep Learning</b> test.</li>
+                                <li>You'll get <b>up to a week</b> to prepare. Final selection is based on a <b>Maths for Deep Learning</b> test.</li>
                             </ul>
                         </div>
                         <hr className="my-7 border-gray-200" />

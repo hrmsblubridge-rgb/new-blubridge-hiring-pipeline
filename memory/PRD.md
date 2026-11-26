@@ -19,7 +19,27 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - [x] Mock-only safety net preserved (`AI_CALLING_ENABLED=false`, Emergency Stop ON, `hiring_ai_testing` only)
 
 ## CHANGELOG
-### 2026-02-?? — Mailing restored (ENABLE_EMAIL / ENABLE_WHATSAPP flip)
+### 2026-02-?? — iter171 · Targeted bug-fix batch
+
+**Reqs delivered**
+1. Interview Schedule Reports export — `otp_verified:-1` prefixed to the sort so the verified attendance record is the one retained by the `(email, schedule_date)` dedup (previously the stale pre-reschedule row could win).
+2. Six-month calendar-based re-registration block replacing the 4-month / 120-day rule. Uses `dateutil.relativedelta(months=6)`, scans all verified-attendance rows, picks most recent `otp_verified_at > otp_sent_at > last_update > schedule_date`, surfaces candidate-facing "Eligible to apply again from dd/mm/yyyy" message. Tester allowlist (`bb_test_credentials`) still bypasses.
+3. Instruction page copy on `PublicRegistration.js:284` updated to "up to a week".
+
+**Reqs explicitly deferred (scope honest-reporting)**
+- Req 2 — Full notification-outbox idempotency (existing partial CAS left intact; shipping a half-centralised outbox would mask legitimate resends).
+- Req 4 — Role-selection flow (Cases 1 & 2) + atomic role-switch + 20-module data consistency sweep + scheduling-page banner. Needs a dedicated session.
+
+**Files**
+- `/app/backend/bb_modules.py` — surgical edits at `register_applicant` and `export_interview_reports`.
+- `/app/frontend/src/pages/PublicRegistration.js` — 1-line text swap.
+- `/app/backend/tests/test_iter171_three_fixes.py` — 7 pytest, all passing.
+
+**Validation**
+- 7/7 pytest in `tests/test_iter171_three_fixes.py`.
+- Zero live-outbound messages sent. Tester identity used read-only via allowlist, tagged write cleaned up on teardown.
+- No schema, index, migration or env changes.
+
 
 **Issue**: Neither candidates nor allowlisted testers received email/WhatsApp. Root cause = `ENABLE_EMAIL="false"` and `ENABLE_WHATSAPP="false"` in `/app/backend/.env` — `send_email()` and `send_whatsapp()` short-circuit on `_is_enabled(...)` before touching Resend / AiSensy.
 

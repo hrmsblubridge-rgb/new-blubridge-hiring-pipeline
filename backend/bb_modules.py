@@ -3266,9 +3266,18 @@ async def export_interview_reports(
     headers = [EXPORT_FIELD_BY_KEY[k][1] for k in selected]
     extractors = [(EXPORT_FIELD_BY_KEY[k][1], EXPORT_FIELD_BY_KEY[k][4]) for k in selected]
 
+    # iter171 — Deterministic ordering before de-dupe. Previously the match
+    # was `$sort: {schedule_date: -1, schedule_time: -1}`, which meant that
+    # when two documents for the same (email, schedule_date) existed (e.g.
+    # a stale pre-reschedule row and a fresh verified row) whichever row
+    # Mongo surfaced first would win the dedup key — occasionally hiding
+    # the ATTENDED row behind a stale Not-Attended one. Adding
+    # `otp_verified: -1` as the FIRST sort key guarantees the verified
+    # attendance record is kept when a key collision occurs; schedule_date
+    # and schedule_time retain their existing tie-breaking role.
     pipeline = [
         {"$match": match},
-        {"$sort": {"schedule_date": -1, "schedule_time": -1}},
+        {"$sort": {"otp_verified": -1, "schedule_date": -1, "schedule_time": -1}},
         {"$project": _export_projection_for(selected)},
     ]
 
@@ -5691,17 +5700,27 @@ async def register_applicant(data: RegistrationBody):
     if not form:
         raise HTTPException(status_code=404, detail="Form not found")
 
-    # ---- 4-MONTH RE-REGISTRATION BLOCK ----
-    # Any applicant who already attended (otp_verified=True) cannot register
-    # again for 4 months, matched by email OR phone.
+    # ---- 6-MONTH RE-REGISTRATION BLOCK (iter171) ----
+    # Any applicant who has a VERIFIED interview attendance (otp_verified=True
+    # anywhere in their history, matched by email OR phone) cannot register
+    # again until six CALENDAR months have passed from their most recent
+    # verified attendance date. Previous rule was 4 months / 120 days; this
+    # change strengthens the restriction and switches to true calendar-month
+    # arithmetic (via dateutil.relativedelta) so month-end dates behave
+    # correctly regardless of month length.
+    #
+    # Pre-interview rejections (otp_verified != True) are NOT subject to this
+    # restriction — the match is strictly on verified attendance, so candidates
+    # who were form-rejected / shortlisted-but-not-scheduled / no-show / etc.
+    # are unaffected.
     email_norm = (data.email or "").strip().lower()
     phone_norm = re.sub(r'[^\d]', '', (data.phone or "").strip())
     if len(phone_norm) > 10:
         phone_norm = phone_norm[-10:]
-    # iter68 — Cooldown bypass: skip the 4-month re-registration block when
-    # the email OR phone matches an entry in `bb_test_credentials` (managed via
-    # the Tester Credentials admin UI). This is the same DB-driven list that
-    # the messaging gate (`messaging.can_send_message`) consults under TEST_MODE.
+    # iter68 — Cooldown bypass: skip the re-registration block when the email
+    # OR phone matches an entry in `bb_test_credentials` (managed via the
+    # Tester Credentials admin UI). Same DB-driven list the messaging gate
+    # (`messaging.can_send_message`) consults under TEST_MODE.
     tc = await _db.bb_test_credentials.find_one(
         {"$or": [{"email": email_norm}, {"phone": phone_norm}]}
     )
@@ -5711,22 +5730,50 @@ async def register_applicant(data: RegistrationBody):
             f"[Cooldown] BYPASS for tester email={email_norm} phone={phone_norm}"
         )
     else:
-        four_months_ago = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
-        recent_attended = await _db.bb_registrations.find_one({
+        from dateutil.relativedelta import relativedelta as _relativedelta
+        now_utc = datetime.now(timezone.utc)
+        six_months_ago = (now_utc - _relativedelta(months=6)).isoformat()
+        # Pull ALL verified-attendance records for this identity so we can
+        # pick the MOST RECENT attendance date deterministically (not merely
+        # whichever one Mongo returns first). Ordering cannot be assumed
+        # without an explicit sort on the attendance-date fields.
+        attended_cursor = _db.bb_registrations.find({
             "$and": [
                 {"$or": [{"email": email_norm}, {"phone": phone_norm}]},
                 {"otp_verified": True},
-                {"$or": [
-                    {"otp_sent_at": {"$gte": four_months_ago}},
-                    {"last_update": {"$gte": four_months_ago}},
-                ]},
             ]
+        }, {
+            "_id": 0,
+            "email": 1, "phone": 1,
+            "otp_verified_at": 1, "otp_sent_at": 1,
+            "last_update": 1, "schedule_date": 1,
         })
-        if recent_attended:
-            raise HTTPException(
-                status_code=409,
-                detail="You have already attended an interview with us. Please try again after 4 months from your last interview."
+        most_recent_attendance = ""   # ISO string; "" sorts before any value
+        async for r in attended_cursor:
+            # Prefer `otp_verified_at` → `otp_sent_at` → `last_update` → `schedule_date`.
+            for fld in ("otp_verified_at", "otp_sent_at", "last_update", "schedule_date"):
+                v = r.get(fld)
+                if v and isinstance(v, str):
+                    if v > most_recent_attendance:
+                        most_recent_attendance = v
+                    break
+        if most_recent_attendance and most_recent_attendance >= six_months_ago:
+            # Compute eligible-again date for the candidate-facing message.
+            eligible_iso = ""
+            try:
+                parsed = datetime.fromisoformat(most_recent_attendance.replace("Z", "+00:00"))
+                eligible_dt = parsed + _relativedelta(months=6)
+                eligible_iso = eligible_dt.strftime("%d/%m/%Y")
+            except Exception:
+                pass
+            detail_msg = (
+                "You have already attended an interview with BluBridge within the last six months. "
+                "As per our recruitment policy, you will be eligible to apply again after six months "
+                "from your last interview attendance date."
             )
+            if eligible_iso:
+                detail_msg += f" Eligible to apply again from: {eligible_iso}"
+            raise HTTPException(status_code=409, detail=detail_msg)
 
     cond = form.get("conditions", {})
     job_role = form.get("job_role", "")
