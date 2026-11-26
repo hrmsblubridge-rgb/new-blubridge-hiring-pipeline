@@ -6309,6 +6309,135 @@ async def register_applicant(data: RegistrationBody):
     }
 
 
+# ============================================================
+# iter172 — Req 4 safe slice: READ-ONLY preview endpoint.
+# ============================================================
+# Detects an existing active application for this identity (email OR phone)
+# so the frontend can render the Case-1 / Case-2 role-selection screens
+# WITHOUT the destructive register endpoint being called first.
+#
+# STRICT CONTRACT:
+#   * No writes. No notifications. No live data mutation.
+#   * No candidate role switch happens here — that is the (future) /switch-role
+#     endpoint which is deliberately NOT shipped in this session because it
+#     needs the paired frontend confirmation UI to be safe end-to-end.
+#   * The 6-month attendance restriction is evaluated here too so the
+#     frontend can show the "blocked" message before even submitting.
+#
+# Response shape:
+#   { "scenario": "none"
+#                 | "blocked_by_attendance"
+#                 | "shortlisted_not_scheduled"
+#                 | "scheduled",
+#     "existing_role": <str, when scenario != none / blocked>,
+#     "schedule_date": <YYYY-MM-DD, when scenario="scheduled">,
+#     "schedule_time": <HH:MM(:SS)?, when scenario="scheduled">,
+#     "eligible_from":  <dd/mm/yyyy, when scenario="blocked_by_attendance"> }
+
+class RegisterPreviewBody(BaseModel):
+    email: str
+    phone: str
+
+    @field_validator("email")
+    @classmethod
+    def _email_ok(cls, v): return (v or "").strip().lower()
+
+    @field_validator("phone")
+    @classmethod
+    def _phone_ok(cls, v):
+        s = re.sub(r"[^\d]", "", (v or "").strip())
+        return s[-10:] if len(s) > 10 else s
+
+
+@pub_router.post("/register/preview")
+async def preview_registration(body: RegisterPreviewBody):
+    """READ-ONLY. See module docstring above — no writes, no notifications."""
+    email = body.email
+    phone = body.phone
+    if not email and not phone:
+        return {"scenario": "none"}
+
+    # Tester bypass — same rule as `register_applicant`.
+    tc = await _db.bb_test_credentials.find_one(
+        {"$or": [{"email": email}, {"phone": phone}]}
+    )
+    is_tester = bool(tc)
+
+    # 6-month attendance restriction (iter171 rule).
+    if not is_tester:
+        from dateutil.relativedelta import relativedelta as _relativedelta
+        now_utc = datetime.now(timezone.utc)
+        six_months_ago = (now_utc - _relativedelta(months=6)).isoformat()
+        attended_cursor = _db.bb_registrations.find(
+            {
+                "$and": [
+                    {"$or": [{"email": email}, {"phone": phone}]},
+                    {"otp_verified": True},
+                ]
+            },
+            {
+                "_id": 0, "otp_verified_at": 1, "otp_sent_at": 1,
+                "last_update": 1, "schedule_date": 1,
+            },
+        )
+        most_recent_attendance = ""
+        async for r in attended_cursor:
+            for fld in ("otp_verified_at", "otp_sent_at", "last_update", "schedule_date"):
+                v = r.get(fld)
+                if v and isinstance(v, str):
+                    if v > most_recent_attendance:
+                        most_recent_attendance = v
+                    break
+        if most_recent_attendance and most_recent_attendance >= six_months_ago:
+            eligible_iso = ""
+            try:
+                parsed = datetime.fromisoformat(
+                    most_recent_attendance.replace("Z", "+00:00")
+                )
+                eligible_iso = (parsed + _relativedelta(months=6)).strftime("%d/%m/%Y")
+            except Exception:
+                pass
+            return {
+                "scenario": "blocked_by_attendance",
+                "eligible_from": eligible_iso,
+            }
+
+    # Active application lookup: NOT superseded, is_shortlisted=True. Most
+    # recent `registered_at` wins so a historical Rejected row cannot mask a
+    # fresh Shortlisted one.
+    active = await _db.bb_registrations.find_one(
+        {
+            "$and": [
+                {"$or": [{"email": email}, {"phone": phone}]},
+                {"superseded": {"$ne": True}},
+                {"is_shortlisted": True},
+            ]
+        },
+        {
+            "_id": 0, "job_role": 1, "schedule_date": 1, "schedule_time": 1,
+            "registered_at": 1,
+        },
+        sort=[("registered_at", -1)],
+    )
+    if not active:
+        return {"scenario": "none"}
+
+    existing_role = active.get("job_role", "") or ""
+    sd = (active.get("schedule_date") or "").strip()
+    st = (active.get("schedule_time") or "").strip()
+    if sd and st:
+        return {
+            "scenario": "scheduled",
+            "existing_role": existing_role,
+            "schedule_date": sd,
+            "schedule_time": st,
+        }
+    return {
+        "scenario": "shortlisted_not_scheduled",
+        "existing_role": existing_role,
+    }
+
+
 @pub_router.post("/schedule-click/{token}")
 async def schedule_click(token: str):
     """Candidate clicked the 'Schedule Interview' CTA — mark the flag so the

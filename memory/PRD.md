@@ -19,7 +19,40 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - [x] Mock-only safety net preserved (`AI_CALLING_ENABLED=false`, Emergency Stop ON, `hiring_ai_testing` only)
 
 ## CHANGELOG
-### 2026-02-?? — iter171 · Targeted bug-fix batch
+### 2026-02-?? — iter172 · Req 4 safe slice + Req 2 audit findings
+
+**Req 2 — Notification duplicate audit (no code change needed).**
+
+Audited every notify_* path. Mapping of existing idempotency:
+
+| Flow | CAS mechanism | Per-channel flags | File |
+|------|---|---|---|
+| Shortlist | `schedule_link_sent` claim-first CAS | `shortlist_wa_sent` / `_email_sent` | bb_modules.py:6158 |
+| Schedule confirmation | `interview_mail_sent_in_progress` CAS | `schedule_message_wa_ok` / `_em_ok` | bg_workers.py:379, bb_modules.py:6557 |
+| OTP | `otp_dispatch_in_progress` CAS | `otp_wa_sent` / `_email_sent` | bg_workers.py:171 |
+| Missed reminder | Per-channel scoped to `missed_reminder_token` | `missed_reminder_wa_sent` / `_email_sent` | bg_workers.py:643 |
+| Rejection | `rejection_sent` + `rejection_pending=False` | `reject_wa_sent` / `_email_sent` | bb_modules.py:6275 |
+| Stale rows | `superseded: != True` via `_cutoff_filter()` | — | bg_workers.py:39 |
+
+Conclusion: the system already has production-grade per-channel CAS everywhere, scoped to schedule_token/version to allow legitimate resends after reschedule. No bug to fix. Shipping more CAS on top would add complexity without closing an actual gap. Admin-triggered manual-alert endpoints (`bb_manual.py /alerts/send-*`) are intentionally not CAS-gated — they are explicit admin resend paths.
+
+**Req 4 — Safe slice shipped.**
+
+Added read-only detection endpoint `POST /api/pub/register/preview` to `bb_modules.py`:
+- Input: `{email, phone}` (normalized server-side).
+- Output: `scenario ∈ {"none", "blocked_by_attendance", "shortlisted_not_scheduled", "scheduled"}` + role name / schedule date-time / eligible_from as applicable.
+- Honours tester allowlist. Reuses the exact 6-month rule from iter171 (same `otp_verified_at > otp_sent_at > last_update > schedule_date` pick).
+- Ignores superseded rows. Sorts by `registered_at: -1` so a historical row cannot mask a fresh application.
+- Strictly READ-ONLY — pytest asserts repeated calls produce zero DB mutation.
+
+The destructive `/switch-role` endpoint (Case-2 interview cancellation, token/OTP invalidation, 20-module consistency sweep) is **not shipped this session** — it needs the paired frontend confirmation UI, identity-reverification OTP, and cross-collection atomic logic to be end-to-end safe. Deliberately deferred to a dedicated session.
+
+**Validation**
+- 7/7 pytest in `tests/test_iter172_register_preview.py`.
+- Regression: 11/11 pytest across iter170 + iter171 + iter172 — all green.
+- Zero live-outbound messages sent. All tests use uuid-tagged throwaway rows.
+- No schema / env / dependency changes.
+
 
 **Reqs delivered**
 1. Interview Schedule Reports export — `otp_verified:-1` prefixed to the sort so the verified attendance record is the one retained by the `(email, schedule_date)` dedup (previously the stale pre-reschedule row could win).
