@@ -19,6 +19,20 @@ Mirror latest verified AI call results onto `bb_registrations.ai_call_results.<p
 - [x] Mock-only safety net preserved (`AI_CALLING_ENABLED=false`, Emergency Stop ON, `hiring_ai_testing` only)
 
 ## CHANGELOG
+### 2026-02-?? — iter175 · Tester full bypass on preview
+
+**Shipped**
+
+- `/api/pub/register/preview` now returns `{"scenario": "none"}` unconditionally for any identity whose email OR phone is present in `bb_test_credentials` (tester allowlist). Applied BEFORE the 6-month attendance check and BEFORE active-application detection, so testers fall straight through to the normal register flow.
+- `/register` keeps its existing supersede mechanism, so the latest tester submission remains the single active row — no duplicates accumulate.
+- Every tester submission fires the usual shortlist / rejection notifications as if it were their first time (the per-registration CAS flags are naturally fresh on the new `registered_at`).
+- Future testers added via the Tester Credentials admin UI automatically inherit the bypass — no code change ever needed.
+
+**Validation**
+- `test_iter175_tester_full_bypass.py` — 6/6 pytest (tester bypasses: scheduled interview, shortlisted-not-scheduled, different role, verified attendance within 6 months, phone-only match; non-tester sanity check still sees `same_role_shortlisted_not_scheduled`).
+- Full regression: iter170 + iter171 + iter172 + iter173 + iter174 + iter175 — 34/34 pytest green.
+- Zero live outbound. uuid-tagged seeds only, narrow teardown.
+
 ### 2026-02-?? — iter174 · Same-role duplicate registration
 
 **Shipped**

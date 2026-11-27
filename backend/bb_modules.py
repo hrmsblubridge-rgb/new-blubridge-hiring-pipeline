@@ -6369,6 +6369,19 @@ async def preview_registration(body: RegisterPreviewBody):
     )
     is_tester = bool(tc)
 
+    # iter175 — Tester identities bypass EVERY existing-application
+    # scenario. For a tester, every submission should proceed as if it
+    # were their first time: no 6-month block, no same-role "already
+    # applied" screen, no Case-1 / Case-2 role-selection. The existing
+    # `register_applicant` supersede logic still ensures only the latest
+    # registration remains the active row, so duplication is handled.
+    if is_tester:
+        _logger.info(
+            f"[Preview] TESTER_BYPASS email={email} phone={phone} "
+            f"— returning scenario=none so submission proceeds as fresh"
+        )
+        return {"scenario": "none"}
+
     # 6-month attendance restriction (iter171 rule).
     if not is_tester:
         from dateutil.relativedelta import relativedelta as _relativedelta

@@ -34,21 +34,12 @@ EMAIL = lambda who: f"it173_{TAG}_{who}@example.test"  # noqa: E731
 
 
 @pytest.fixture(autouse=True)
-def _ensure_tester_allowlist_and_cleanup():
-    """The authorized test identity (rishi.nayak@blubridge.com / 9443109903)
-    is in bb_test_credentials — it bypasses the 6-month gate. Our synthetic
-    test identities MUST also bypass the gate so attendance history from a
-    prior iter test doesn't poison the result."""
-    c = MongoClient(MONGO_URL)
-    db = c[DB_NAME]
-    # Add every synthetic identity we use to the allowlist.
-    for who in ("owner", "scheduled", "cas", "updated"):
-        db.bb_test_credentials.update_one(
-            {"email": EMAIL(who)},
-            {"$setOnInsert": {"email": EMAIL(who), "phone": f"9000{TAG[:4]}{ord(who[0]) % 10}1"}},
-            upsert=True,
-        )
-    c.close()
+def _cleanup():
+    """iter175 — iter173's synthetic identities must NOT be on the tester
+    allowlist, otherwise the new tester full-bypass short-circuits the
+    preview endpoint and hides the Case-1 / Case-2 scenarios these tests
+    verify. The 6-month gate won't trip anyway — seeded rows don't have
+    `otp_verified: True`."""
     yield
     c = MongoClient(MONGO_URL)
     db = c[DB_NAME]
